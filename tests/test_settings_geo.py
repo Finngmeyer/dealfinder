@@ -233,6 +233,12 @@ class TestGeo:
         assert place.county_fips is None
         assert "county unknown" in place.describe()
 
+    def test_connecticut_zips_map_to_planning_regions(self):
+        hartford = lookup_zip("06103")
+        assert hartford is not None
+        assert (hartford.county_fips, hartford.county_name) == ("09110", "Capitol Planning Region")
+        assert hartford.in_contiguous_us is True
+
     def test_unknown_prefix(self):
         place = lookup_zip("00000")
         assert place is not None

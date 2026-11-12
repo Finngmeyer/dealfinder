@@ -5,16 +5,20 @@ Local-first Python app that finds small multifamily listings (fourplexes by defa
 
 ## Current phase
 
-**Phase 1 is built and waiting for the owner's OK.** Next is Phase 2 (free market data).
-Work one phase at a time: each ends with passing tests, a demo command and a commit, then stop
-and wait for approval before starting the next.
+**Phases 1 and 2 are built.** Next is Phase 3. Each phase ends with passing tests, a demo
+command and a commit. The standing rule is to stop for the owner's OK after each phase; on
+November 12 the owner said to keep working through the phases while they were away.
+
+Phase 2 still needs a live check of the two sources that need keys (HUD rents, Census ACS)
+once the owner supplies `HUD_API_TOKEN` and `CENSUS_API_KEY`. They are built from the published
+formats and tested against mocks only. FRED, Zillow and FEMA were run live.
 
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Plan | approved |
 | 1 | Underwriting engine, financing presets, `analyze` CLI, golden test, no network | built |
-| 2 | FRED, HUD FMR/SAFMR, ACS, ZORI, FEMA NRI clients with disk cache; `market --zip` | next |
-| 3 | RentCast adapter, SQLite + Alembic, dedupe, budget guard, `--dry-run`, CSV import, inventory probe | |
+| 2 | FRED, HUD FMR/SAFMR, ACS, ZORI, FEMA NRI clients with disk cache; `market --zip` | built; HUD and ACS unverified live |
+| 3 | RentCast adapter, SQLite + Alembic, dedupe, budget guard, `--dry-run`, CSV import, inventory probe | next |
 | 4 | Property-record step for unit counts, text classifier, type toggles, optional LLM extraction | |
 | 5 | Stage-2 enrichment, scoring, buy box, Streamlit dashboard | |
 | 6 | Scheduler, alerts, exports, optional scraper adapters, README | |
@@ -25,11 +29,15 @@ and wait for approval before starting the next.
 uv sync                                   # install (Python 3.12)
 uv run pytest                             # all tests; tests/test_engine.py is the golden test
 uv run ruff check . && uv run ruff format .
-uv run dealfinder analyze --price 480000 --rents 1350x4 --zip 43215   # one deal, no network
+uv run dealfinder analyze --price 480000 --rents 1350x4 --zip 43215 --beds 2x4   # one deal
+uv run dealfinder market --zip 43215      # rents, taxes, vacancy, rates, hazard, loan limits
 uv run dealfinder settings                # settings in effect, files, which keys are set
 uv run python scripts/build_zip_county.py        # rebuild the bundled ZIP-to-county data
 uv run python scripts/build_loan_limits.py 2027  # county loan limits for a new year (add 2027.yaml first)
 ```
+
+`analyze` and `market` read market data from `data/cache` and the network. `--offline` uses the
+cache only, `analyze --no-market` skips market data, `market --refresh` downloads again.
 
 Golden deal, scenario A then B:
 
@@ -42,10 +50,11 @@ uv run dealfinder analyze --price 480000 --rents 1350x4 --zip 43215 --year-built
 
 ## Stack
 
-Python 3.12, uv, ruff, pytest. pydantic v2 + pydantic-settings, PyYAML, Typer + rich.
-Added in the phase that first needs them: httpx + tenacity + on-disk cache (2), SQLAlchemy 2 +
-Alembic on SQLite, pandas (3), Anthropic SDK with model `claude-haiku-5-5` for optional listing
-text extraction (4), Streamlit + pydeck + plotly (5), cron or the OS scheduler (6).
+Python 3.12, uv, ruff, pytest (HTTP mocked with respx). pydantic v2 + pydantic-settings,
+PyYAML, Typer + rich, httpx + tenacity with an on-disk cache. Added in the phase that first
+needs them: SQLAlchemy 2 + Alembic on SQLite, pandas (3), Anthropic SDK with model
+`claude-haiku-5-5` for optional listing text extraction (4), Streamlit + pydeck + plotly (5),
+cron or the OS scheduler (6).
 
 ## Layout
 
@@ -55,8 +64,11 @@ config/settings.local.yaml      personal overrides, merged over settings.yaml, g
 config/loan_limits/<year>.yaml  national FHA and conforming limits by unit count
 config/loan_limits/<year>_counties.csv  the same by county, built from HUD's files
 config/insurance_by_state.csv   placeholder $/unit/year
+config/utility_allowance.csv    placeholder $/month by bedrooms, netted off HUD rents
 src/dealfinder/underwrite/      engine: pure functions over frozen pydantic inputs, no I/O
-src/dealfinder/analysis.py      builds engine inputs from a request + settings, tracks sources
+src/dealfinder/http.py          Fetcher: every request goes through it (cache, retries, pacing)
+src/dealfinder/market/          one module per free source, plus context.py (all of them for a ZIP)
+src/dealfinder/analysis.py      builds engine inputs from a request + market data + settings
 src/dealfinder/settings.py      loads config; Environment holds secrets and paths
 src/dealfinder/geo.py           ZIP to county and state from bundled Census data
 src/dealfinder/render.py        terminal output
@@ -84,6 +96,12 @@ data/                           runtime: database, cache, imports, labeled text 
   reserves use whole-building rent; the moved-out view charges a manager.
 - **Secrets** go in `.env` (git-ignored); `.env.example` lists every variable. A missing key
   turns that feature off with a message. Never print or log a key.
+- **All HTTP goes through `Fetcher`.** It caches every response on disk, retries with backoff,
+  paces requests per host, falls back to a stale copy when a refresh fails, and never writes a
+  key to disk: pass keys as `secret_params` or headers. A source problem raises
+  `SourceUnavailable` with a reason a person can act on; nothing else should escape a source.
+- **Tests never touch the network.** An autouse fixture fails any request without a mocked
+  route, and `DEALFINDER_OFFLINE=1` is set for every test. Fixtures are synthetic.
 - **No real data in git.** No API responses, listing text, MLS remarks or personal buy-box
   values. The 50+ labeled descriptions for Phase 4 stay under `data/`.
 - **Sources:** licensed APIs and government data first. No CAPTCHA solving, proxy rotation or
@@ -120,6 +138,10 @@ data/                           runtime: database, cache, imports, labeled text 
 - Unknown flood zone is flagged, not charged (`when_unknown.in_flood_zone: false`); unknown
   county hazard applies the 1.5x insurance multiplier. Both are settings.
 - Utility allowance and flood premium are config placeholders with no data source.
+- HUD rents are gross, so the utility allowance comes off unless the owner is known to pay
+  utilities. Without bedroom counts no market rent is estimated, since a rent for the wrong
+  size would be worse than none. Zillow's index is a cross-check only: rents more than 25%
+  above it raise a flag.
 
 ## Verified facts about the data sources (checked November 2026)
 
@@ -135,13 +157,17 @@ data/                           runtime: database, cache, imports, labeled text 
   missing attributes from the whole building.
 - RentCast plans: Developer $0 / 50, Foundation $74 / 1,000, Growth $199 / 5,000,
   Scale $449 / 25,000; overage $0.20 / $0.06 / $0.03 / $0.015.
-- **Census API** rejects keyless requests: `CENSUS_API_KEY` is required. ACS median taxes paid
-  (B25103) is capped at $10,000; consider aggregate taxes / aggregate value (B25090 / B25082)
-  where it is capped. Connecticut uses planning-region codes from ACS 2022 on, not the county
-  codes in the bundled 2020 ZIP table.
+- **Census API** rejects keyless data requests (`CENSUS_API_KEY` is required), but variable
+  metadata is readable without a key, which is how B25103, B25077, B25090, B25082 and
+  DP04_0005E were confirmed. The newest 5-year vintage is 2024; 2025 returned 404. Median taxes
+  (B25103) are capped at $10,000, so capped counties use aggregate taxes / aggregate value.
 - **FRED** keyless CSV works: `fredgraph.csv?id=MORTGAGE30US` (7.11% on 2026-11-12).
 - **HUD** FMR API needs a bearer token; `fmr/data/{entityid}?year=`, entity ids look like
-  `3904999999` (county) or `METRO10180M10180`.
+  `3904999999` (county), `METRO10180M10180` (metro) or a 10-digit town code in New England
+  (`5002175925`). `basicdata` is one object for an ordinary area and a list with one row per
+  ZIP plus a `"zip_code": "MSA level"` row where Small Area FMRs apply. Values may be strings.
+  Not built yet: the New England town lookup (the Census ZCTA-to-county-subdivision file gives
+  ZIP to town) and HUD's ZIP crosswalk, both waiting for a token to test against.
 - **FEMA NFHL**: find the "Flood Hazard Zones" layer by name in `MapServer?f=json` (currently
   28); point queries return `FLD_ZONE`, `ZONE_SUBTY`, `SFHA_TF`.
 - **FEMA NRI**: the old download page redirects and blocks scripts. Use the public ArcGIS
@@ -154,7 +180,10 @@ data/                           runtime: database, cache, imports, labeled text 
   `apps.hud.gov/pub/chums/cy<year>-forward-limits.txt` and `cy<year>-gse-limits.txt` (layout:
   `file_layouts.html` there). HUD's conforming file matched FHFA's own list for all 3,235
   counties. FHFA announces the next year's limits in late November.
-- **Connecticut** county codes: HUD, FHFA and ACS (2022 on) use planning regions (09110-09190).
-  The bundled 2020 ZIP table still returns the old counties (09001-09015), so Connecticut ZIPs
-  miss the county limit table and fall back to national minimums. Phase 2's HUD ZIP crosswalk
-  should fix this.
+- **Connecticut** county codes: HUD, FHFA, FEMA and ACS (2022 on) use planning regions
+  (09110-09190). `scripts/build_zip_county.py` maps each Connecticut ZIP to its planning region
+  through its main town, using the Census county-subdivision file and Connecticut crosswalk.
+- **Zillow** also publishes a county ZORI file (`County_zori_uc_sfrcondomfr_sm_month.csv`,
+  FIPS in `StateCodeFIPS` + `MunicipalCodeFIPS`), used when a ZIP has no index of its own.
+- This sandbox reaches the network through a proxy with its own CA; httpx honours
+  `SSL_CERT_FILE` and `HTTPS_PROXY` from the environment, so no client changes are needed.

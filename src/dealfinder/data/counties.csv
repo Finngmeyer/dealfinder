@@ -308,14 +308,15 @@ county_fips,state,name
 08121,CO,Washington County
 08123,CO,Weld County
 08125,CO,Yuma County
-09001,CT,Fairfield County
-09003,CT,Hartford County
-09005,CT,Litchfield County
-09007,CT,Middlesex County
-09009,CT,New Haven County
-09011,CT,New London County
-09013,CT,Tolland County
-09015,CT,Windham County
+09110,CT,Capitol Planning Region
+09120,CT,Greater Bridgeport Planning Region
+09130,CT,Lower Connecticut River Valley Planning Region
+09140,CT,Naugatuck Valley Planning Region
+09150,CT,Northeastern Connecticut Planning Region
+09160,CT,Northwest Hills Planning Region
+09170,CT,South Central Connecticut Planning Region
+09180,CT,Southeastern Connecticut Planning Region
+09190,CT,Western Connecticut Planning Region
 10001,DE,Kent County
 10003,DE,New Castle County
 10005,DE,Sussex County

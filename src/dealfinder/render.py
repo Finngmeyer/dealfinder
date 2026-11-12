@@ -6,10 +6,13 @@ from rich import box
 from rich.console import Console
 from rich.table import Table
 
-from dealfinder.analysis import AnalysisResult, InputLine
+from dealfinder.analysis import AnalysisResult, AnalyzeRequest, InputLine, base_rate
+from dealfinder.market.context import MarketContext
+from dealfinder.settings import Config
 from dealfinder.underwrite import ScenarioResult
 
 NOT_AVAILABLE = "n/a"
+_STATE_STYLE = {"ok": None, "stale": "yellow", "off": "dim", "unavailable": "yellow"}
 _LEVEL_STYLE = {"info": "dim", "warning": "yellow", "red": "bold red"}
 _LEVEL_MARK = {"info": "note", "warning": "check", "red": "RED FLAG"}
 _KIND_LABEL = {"actual": "actual", "estimated": "estimate", "override": "yours"}
@@ -260,9 +263,144 @@ def _notes_and_flags(result: AnalysisResult, console: Console) -> None:
         )
 
 
+def _sources(market: MarketContext, console: Console) -> None:
+    table = _table("Market data", "State", "Detail", numeric_from=99)
+    for status in market.sources:
+        table.add_row(status.label, status.state, status.detail, style=_STATE_STYLE[status.state])
+    console.print(table)
+
+
+def _closing_lines(attributions: list[str], disclaimer: str, console: Console) -> None:
+    console.print()
+    for notice in attributions:
+        console.print(notice, style="dim")
+    console.print(disclaimer, style="italic")
+
+
+def render_market(market: MarketContext, config: Config, console: Console) -> None:
+    """Everything known about one ZIP, and what each figure does to the underwriting."""
+    settings = config.settings
+    place = market.place
+    console.print(f"[bold]{place.describe() if place else market.zip_code}[/bold]")
+    if place is not None and place.in_contiguous_us is False:
+        console.print(
+            f"{place.state} is outside the 48 contiguous states and DC that this tool covers.",
+            style="yellow",
+        )
+    _sources(market, console)
+
+    # Mortgage rate and what each loan would price at today.
+    probe = AnalyzeRequest(price=1.0, rents=[0.0], zip_code=market.zip_code)
+    base, source, flagged = base_rate(probe, config, market)
+    console.print(
+        f"[bold]Base mortgage rate[/bold] {percent(base)}, from {source}",
+        style="yellow" if flagged else None,
+    )
+    rates = _table("Loan", "Spread", "Rate")
+    for name, preset in settings.financing.presets.items():
+        if not preset.enabled or preset.program == "cash":
+            continue
+        if preset.rate_quote is not None:
+            rates.add_row(name, "your quote", percent(preset.rate_quote))
+        else:
+            rates.add_row(
+                name, f"+{preset.rate_spread * 100:.2f} pt", percent(base + preset.rate_spread)
+            )
+    console.print(rates)
+
+    # Rents
+    rents = market.fair_market_rents
+    if rents is not None:
+        table = _table(rents.describe(), "Gross rent", "Utility allowance", "Net rent")
+        for bedrooms in sorted(rents.rents):
+            gross = rents.gross_rent(bedrooms, settings.market.fmr_extra_bedroom_pct)
+            allowance = config.utility_allowance_for(bedrooms)
+            table.add_row(
+                "Studio" if bedrooms == 0 else f"{bedrooms} bedroom",
+                money(gross),
+                money(allowance),
+                money(max(0.0, gross - allowance)),
+            )
+        console.print(table)
+        console.print(
+            "Gross rent includes utilities. The net figure is used when tenants pay their own "
+            "(the allowance is a placeholder).",
+            style="dim",
+        )
+    index = market.rent_index
+    if index is not None:
+        growth = (
+            "no figure a year back"
+            if index.yoy_growth is None
+            else (f"{index.yoy_growth:+.1%} over 12 months")
+        )
+        console.print(
+            f"[bold]Typical rent[/bold] {money(index.level)} a month in {index.geography} "
+            f"{index.region} ({growth}; Zillow ZORI, {index.as_of:%b %Y})"
+        )
+
+    # Taxes and vacancy
+    housing = market.housing
+    unknown = settings.when_unknown
+    if housing is not None:
+        computed = housing.effective_tax_rate()
+        if computed is not None:
+            rate, method = computed
+            console.print(
+                f"[bold]Property tax rate[/bold] {percent(rate)} ({method}; {housing.vintage}, "
+                f"{housing.name})"
+            )
+        rule = settings.underwriting.vacancy
+        if housing.rental_vacancy is not None:
+            used = min(0.99, max(rule.floor, housing.rental_vacancy + rule.county_add))
+            console.print(
+                f"[bold]Vacancy[/bold] {percent(used)} (county rental vacancy "
+                f"{percent(housing.rental_vacancy, 1)} + {rule.county_add * 100:g} pt, floor "
+                f"{percent(rule.floor, 0)})"
+            )
+    else:
+        console.print(
+            f"[bold]Property tax rate[/bold] {percent(unknown.tax_rate)} and [bold]vacancy[/bold] "
+            f"{percent(unknown.vacancy_rate, 0)} are stand-ins until Census data is connected.",
+            style="yellow",
+        )
+
+    # Hazard and insurance
+    insurance = settings.underwriting.insurance
+    state = place.state if place else None
+    base_premium = config.insurance_by_state.get(state or "", insurance.per_unit_year)
+    risk = market.risk
+    if risk is not None:
+        high = risk.rating in settings.market.high_risk_ratings
+        multiplier = insurance.high_risk_multiplier if high else 1.0
+        score = "" if risk.score is None else f", score {risk.score:.0f} of 100"
+        detail = f"hazard rating {risk.rating}{score}"
+    else:
+        multiplier = insurance.high_risk_multiplier if unknown.high_hazard_county else 1.0
+        detail = "hazard rating not loaded"
+    console.print(
+        f"[bold]Insurance[/bold] {money(base_premium * multiplier)} per unit per year "
+        f"(placeholder {money(base_premium)} x {multiplier:g}; {detail})"
+    )
+
+    # Loan limits
+    county = place.county_fips if place else None
+    limits = _table(f"Loan limits {config.loan_limits.year}", "1 unit", "2 units", "3", "4")
+    for label, kind in (("FHA", "fha"), ("Conforming", "conforming_county")):
+        cells = [money(config.loan_limits.limit(kind, units, county)) for units in (1, 2, 3, 4)]
+        limits.add_row(label, *cells)
+    console.print(limits)
+    if not config.loan_limits.lookup("fha", 4, county).county_specific:
+        console.print("County not in the limit table: national minimums shown.", style="yellow")
+
+    _closing_lines(market.attributions, "Estimates only. Verify before you rely on them.", console)
+
+
 def render_analysis(result: AnalysisResult, console: Console) -> None:
     _header(result, console)
     _inputs(result, console)
+    if result.market is not None:
+        _sources(result.market, console)
     _statement(result, console)
     if result.scenarios:
         _scenarios(result, console)
@@ -273,4 +411,4 @@ def render_analysis(result: AnalysisResult, console: Console) -> None:
         for name, reason in result.skipped.items():
             console.print(f"{name}: {reason}", style="dim")
     _notes_and_flags(result, console)
-    console.print(f"\n{result.disclaimer}", style="italic")
+    _closing_lines(result.attributions, result.disclaimer, console)

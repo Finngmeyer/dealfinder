@@ -274,15 +274,23 @@ class TestLoanLimits:
         assert not scenario(result, "fha_house_hack").loan.capped_by_limit
 
     def test_unknown_county_uses_the_national_floor_and_flags_it(self, config):
-        # Hartford's ZIP maps to a pre-2022 county code that the limit table no longer uses.
-        result = analyze(request(price=1_200_000, rents=[3_000] * 4, zip_code="06103"), config)
+        # 43216 is a PO-box ZIP: the state is known from its prefix but the county is not.
+        result = analyze(request(price=1_200_000, rents=[3_000] * 4, zip_code="43216"), config)
         fha = scenario(result, "fha_house_hack")
         assert fha.loan.base_loan == 1_041_125
         assert "loan_limit_national" in codes(result)
 
     def test_no_flag_when_the_national_floor_does_not_bind(self, config):
-        result = analyze(request(zip_code="06103"), config)
+        result = analyze(request(zip_code="43216"), config)
         assert "loan_limit_national" not in codes(result)
+
+    def test_connecticut_uses_its_planning_region(self, config):
+        # Stamford is in the Western Connecticut planning region: four-unit FHA limit $1,879,850.
+        result = analyze(request(price=1_900_000, rents=[4_500] * 4, zip_code="06901"), config)
+        fha = scenario(result, "fha_house_hack")
+        assert result.place.county_fips == "09190"
+        assert not fha.loan.capped_by_limit
+        assert fha.loan.base_loan == pytest.approx(1_900_000 * 0.965)
 
     def test_owner_loan_stays_at_the_baseline_but_investor_loan_uses_the_county(self, config):
         result = analyze(request(price=2_400_000, rents=[5_000] * 4, zip_code="90012"), config)

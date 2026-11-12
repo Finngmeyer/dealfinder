@@ -1,4 +1,4 @@
-"""Command line: ``dealfinder analyze`` underwrites one deal with no network access."""
+"""Command line: ``analyze`` underwrites one deal, ``market`` shows the data for a ZIP code."""
 
 from __future__ import annotations
 
@@ -10,8 +10,11 @@ from pydantic import ValidationError
 from rich.console import Console
 
 from dealfinder.analysis import AnalysisError, AnalyzeRequest, analyze
-from dealfinder.render import render_analysis
-from dealfinder.settings import Environment, SettingsError, load_config
+from dealfinder.geo import normalize_zip
+from dealfinder.http import Fetcher
+from dealfinder.market.context import MarketContext, load_market
+from dealfinder.render import render_analysis, render_market
+from dealfinder.settings import Config, Environment, SettingsError, load_config
 
 app = typer.Typer(
     add_completion=False,
@@ -22,7 +25,23 @@ app = typer.Typer(
 
 @app.callback()
 def main() -> None:
-    """Keeps ``analyze`` a named subcommand while it is the only deal command."""
+    """Find and underwrite small multifamily deals."""
+
+
+def market_for(
+    zip_code: str, config: Config, *, offline: bool = False, refresh: bool = False
+) -> MarketContext:
+    """Market data for a ZIP from the cache and, unless offline, the network."""
+    environment = Environment()
+    fetcher = Fetcher(
+        environment.cache_dir,
+        offline=offline or environment.dealfinder_offline,
+        refresh=refresh,
+    )
+    try:
+        return load_market(zip_code, config, environment, fetcher)
+    finally:
+        fetcher.close()
 
 
 def parse_rents(text: str) -> list[float]:
@@ -108,6 +127,10 @@ def analyze_command(
         list[str] | None,
         typer.Option(help="Loan preset to show. Repeat for several. Default: all enabled."),
     ] = None,
+    beds: Annotated[
+        str | None,
+        typer.Option(help="Bedrooms per unit, e.g. 2,2,1,1 or 2x4. Used to look up market rents."),
+    ] = None,
     owner_unit: Annotated[
         int | None,
         typer.Option(help="Unit you would live in (1 = first). Default: the highest rent."),
@@ -116,6 +139,13 @@ def analyze_command(
         float | None,
         typer.Option(help="What you pay in rent today, to compare a house hack against."),
     ] = None,
+    offline: Annotated[
+        bool, typer.Option("--offline", help="Use cached market data only; make no requests.")
+    ] = False,
+    no_market: Annotated[
+        bool,
+        typer.Option("--no-market", help="Ignore market data; use entered values and stand-ins."),
+    ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON.")] = False,
 ) -> None:
     """Underwrite one deal from its price, rents and ZIP code."""
@@ -128,6 +158,7 @@ def analyze_command(
             rents=parse_rents(rents),
             zip_code=zip_code,
             market_rents=parse_rents(market_rents) if market_rents else None,
+            beds=parse_rents(beds) if beds else None,
             year_built=year_built,
             building_sqft=sqft,
             tax_rate=_fraction(tax_rate),
@@ -149,7 +180,8 @@ def analyze_command(
             owner_unit=owner_unit,
             comparison_rent=my_rent,
         )
-        result = analyze(request, config)
+        market = None if no_market else market_for(request.zip_code, config, offline=offline)
+        result = analyze(request, config, market)
     except ValidationError as error:
         problems = "; ".join(
             f"{'.'.join(str(part) for part in issue['loc']) or 'input'}: {issue['msg']}"
@@ -163,6 +195,31 @@ def analyze_command(
         typer.echo(result.model_dump_json(indent=2))
     else:
         render_analysis(result, Console())
+
+
+@app.command("market")
+def market_command(
+    zip_code: Annotated[str, typer.Option("--zip", help="Five-digit ZIP code.")],
+    offline: Annotated[
+        bool, typer.Option("--offline", help="Use cached data only; make no requests.")
+    ] = False,
+    refresh: Annotated[
+        bool, typer.Option("--refresh", help="Download everything again, ignoring the cache.")
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON.")] = False,
+) -> None:
+    """Show rents, taxes, vacancy, rates, hazard rating and loan limits for a ZIP code."""
+    if normalize_zip(zip_code) is None:
+        raise typer.BadParameter(f"'{zip_code}' is not a 5-digit ZIP code.", param_hint="--zip")
+    try:
+        config = load_config()
+    except SettingsError as error:
+        raise _fail(str(error)) from error
+    market = market_for(zip_code, config, offline=offline, refresh=refresh)
+    if json_output:
+        typer.echo(market.model_dump_json(indent=2))
+    else:
+        render_market(market, config, Console())
 
 
 @app.command("settings")

@@ -1,8 +1,9 @@
-"""Assemble one deal from what is known, fill the gaps from settings, and run every loan preset.
+"""Assemble one deal from what is known, fill the gaps, and run every loan preset.
 
+Gaps are filled in this order: the user's own figure, market data for the ZIP when a
+``MarketContext`` is supplied, then the pessimistic stand-in from settings, which raises a flag.
 Each input records where it came from and whether it is an actual figure, an estimate, or the
-user's own override. An unknown input takes the pessimistic stand-in from settings and raises a
-flag, so nothing optimistic slips in unannounced.
+user's own override.
 """
 
 from __future__ import annotations
@@ -12,7 +13,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dealfinder.geo import Place, lookup_zip
+from dealfinder.market.context import MarketContext
 from dealfinder.settings import Config, Preset
+from dealfinder.text import money_list, short_date
 from dealfinder.underwrite import (
     DealInputs,
     LoanTerms,
@@ -27,6 +30,7 @@ DISCLAIMER = "Estimates only. Verify rents, taxes, insurance and financing befor
 
 Kind = Literal["actual", "estimated", "override"]
 ValueUnit = Literal["money", "money_month", "money_year", "percent", "number", "text"]
+PaidBy = Literal["owner", "tenant", "unknown"]
 
 
 class AnalysisError(Exception):
@@ -58,7 +62,8 @@ class RateInfo(BaseModel):
 
 
 class AnalyzeRequest(BaseModel):
-    """What the user knows about a deal. Anything left as None is filled from settings."""
+    """What the user knows about a deal. Anything left as None is filled from market data or
+    settings."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -66,6 +71,7 @@ class AnalyzeRequest(BaseModel):
     rents: list[float] = Field(min_length=1)  # current monthly rent, one per unit
     zip_code: str
     market_rents: list[float] | None = None
+    beds: list[float] | None = None  # bedrooms per unit, used to look up market rents
     year_built: int | None = None
     building_sqft: float | None = Field(default=None, gt=0)
     tax_rate: float | None = Field(default=None, ge=0, le=1)
@@ -89,17 +95,23 @@ class AnalyzeRequest(BaseModel):
 
     @model_validator(mode="after")
     def _consistent(self) -> AnalyzeRequest:
+        units = len(self.rents)
         if any(rent < 0 for rent in self.rents):
             raise ValueError("rents cannot be negative")
         if self.market_rents is not None:
-            if len(self.market_rents) != len(self.rents):
+            if len(self.market_rents) != units:
                 raise ValueError(
-                    f"{len(self.market_rents)} market rents were given for {len(self.rents)} units"
+                    f"{len(self.market_rents)} market rents were given for {units} units"
                 )
             if any(rent < 0 for rent in self.market_rents):
                 raise ValueError("market rents cannot be negative")
-        if self.owner_unit is not None and self.owner_unit > len(self.rents):
-            raise ValueError(f"owner unit {self.owner_unit} is not one of {len(self.rents)} units")
+        if self.beds is not None:
+            if len(self.beds) != units:
+                raise ValueError(f"{len(self.beds)} bedroom counts were given for {units} units")
+            if any(count < 0 for count in self.beds):
+                raise ValueError("bedroom counts cannot be negative")
+        if self.owner_unit is not None and self.owner_unit > units:
+            raise ValueError(f"owner unit {self.owner_unit} is not one of {units} units")
         return self
 
 
@@ -114,6 +126,8 @@ class AnalysisResult(BaseModel):
     rates: dict[str, RateInfo]
     skipped: dict[str, str]
     ranking_scenario: str
+    market: MarketContext | None = None
+    attributions: list[str] = Field(default_factory=list)
     disclaimer: str = DISCLAIMER
 
 
@@ -151,10 +165,6 @@ class _Assembly:
         self.flags.append(Flag(code=code, level=level, message=message))
 
 
-def _money_list(values: list[float]) -> str:
-    return ", ".join(f"${value:,.0f}" for value in values)
-
-
 def _locate(request: AnalyzeRequest, out: _Assembly) -> Place | None:
     place = lookup_zip(request.zip_code)
     if place is None:
@@ -186,63 +196,116 @@ def _locate(request: AnalyzeRequest, out: _Assembly) -> Place | None:
     return place
 
 
-def _units(request: AnalyzeRequest, out: _Assembly) -> tuple[Unit, ...]:
-    market = request.market_rents
-    units = tuple(
-        Unit(in_place_rent=rent, market_rent=None if market is None else market[index])
-        for index, rent in enumerate(request.rents)
-    )
+def _who_pays_utilities(request: AnalyzeRequest, config: Config) -> tuple[PaidBy, bool]:
+    """(who pays, whether the user said so)."""
+    if request.tenants_pay_utilities is None:
+        return config.settings.underwriting.utilities.paid_by, False
+    return ("tenant" if request.tenants_pay_utilities else "owner"), True
+
+
+def _fmr_rents(
+    request: AnalyzeRequest, config: Config, market: MarketContext | None, paid_by: PaidBy
+) -> tuple[list[float], str] | None:
+    """Market rent per unit from HUD Fair Market Rents, when they and bedroom counts are known.
+
+    FMRs are gross rents that include tenant-paid utilities, so a utility allowance comes off
+    unless the owner is known to pay the utilities.
+    """
+    rents = market.fair_market_rents if market else None
+    if rents is None or request.beds is None:
+        return None
+    extra = config.settings.market.fmr_extra_bedroom_pct
+    net_of_utilities = paid_by != "owner" and bool(config.utility_allowance)
+    estimates = [
+        max(
+            0.0,
+            rents.gross_rent(beds, extra)
+            - (config.utility_allowance_for(beds) if net_of_utilities else 0.0),
+        )
+        for beds in request.beds
+    ]
+    suffix = ", less a placeholder utility allowance" if net_of_utilities else ""
+    return estimates, f"{rents.describe()}{suffix}"
+
+
+def _units(
+    request: AnalyzeRequest,
+    config: Config,
+    market: MarketContext | None,
+    paid_by: PaidBy,
+    out: _Assembly,
+) -> tuple[Unit, ...]:
     out.line(
         "rents",
         "Current rents",
         sum(request.rents),
         "money_month",
         "actual",
-        f"entered: {_money_list(request.rents)}",
+        f"entered: {money_list(request.rents)}",
     )
-    if market is None:
-        out.flag(
-            "market_rent_unknown",
-            "info",
-            "No market rents were given, so the pro forma equals current rents.",
-        )
-    else:
+    market_rents = request.market_rents
+    if market_rents is not None:
         out.line(
             "market_rents",
             "Market rents",
-            sum(market),
+            sum(market_rents),
             "money_month",
             "estimated",
-            f"entered: {_money_list(market)}",
+            f"entered: {money_list(market_rents)}",
         )
-        above = [str(i + 1) for i, unit in enumerate(units) if unit.current_rent < request.rents[i]]
-        if above:
-            out.flag(
-                "rent_above_market",
-                "info",
-                f"In-place rent is above market for unit {', '.join(above)}; cash flow uses "
-                "the lower market figure.",
+    else:
+        estimated = _fmr_rents(request, config, market, paid_by)
+        if estimated is not None:
+            market_rents, source = estimated
+            stale = bool(market and market.fair_market_rents and market.fair_market_rents.stale)
+            out.line(
+                "market_rents",
+                "Market rents",
+                sum(market_rents),
+                "money_month",
+                "estimated",
+                f"{source}: {money_list(market_rents)}",
+                flagged=stale,
             )
+        else:
+            have_rents = market is not None and market.fair_market_rents is not None
+            out.flag(
+                "market_rent_unknown",
+                "info",
+                "No market rents were given"
+                + (
+                    " and no bedroom counts to look them up with"
+                    if have_rents and request.beds is None
+                    else ""
+                )
+                + ", so the pro forma equals current rents.",
+            )
+
+    beds = request.beds
+    units = tuple(
+        Unit(
+            in_place_rent=rent,
+            market_rent=None if market_rents is None else market_rents[index],
+            beds=None if beds is None else beds[index],
+        )
+        for index, rent in enumerate(request.rents)
+    )
+    above = [str(i + 1) for i, unit in enumerate(units) if unit.current_rent < request.rents[i]]
+    if above:
+        out.flag(
+            "rent_above_market",
+            "info",
+            f"In-place rent is above market for unit {', '.join(above)}; cash flow uses the "
+            "lower market figure.",
+        )
     return units
 
 
-def assemble_deal(
-    request: AnalyzeRequest, config: Config
-) -> tuple[DealInputs, list[InputLine], list[Flag], Place | None]:
-    """Build engine inputs plus the list of where each one came from."""
-    settings = config.settings
-    underwriting = settings.underwriting
-    unknown = settings.when_unknown
-    out = _Assembly()
-
-    out.line("price", "Price", request.price, "money", "actual", "entered")
-    place = _locate(request, out)
-    units = _units(request, out)
-    unit_count = len(units)
-
-    # Year built decides the repairs and reserves band.
+def _age_band(request: AnalyzeRequest, config: Config, out: _Assembly) -> tuple[float, float]:
+    """Repairs and reserves shares, chosen by year built."""
+    known = request.year_built is not None
     if request.year_built is None:
-        year_built = unknown.year_built
+        year_built = config.settings.when_unknown.year_built
         out.line(
             "year_built",
             "Year built",
@@ -260,44 +323,300 @@ def assemble_deal(
     else:
         year_built = request.year_built
         out.line("year_built", "Year built", year_built, "number", "actual", "entered")
-    band = underwriting.age_band(year_built)
-    band_name = "newest band" if band.built_before is None else f"built before {band.built_before}"
+    band = config.settings.underwriting.age_band(year_built)
+    name = "newest band" if band.built_before is None else f"built before {band.built_before}"
     for key, label, value in (
         ("repairs_pct", "Repairs", band.repairs_pct),
         ("reserves_pct", "Capital reserves", band.reserves_pct),
     ):
         out.line(
-            key,
-            label,
-            value,
-            "percent",
-            "estimated",
-            f"share of GSR, {band_name}",
-            flagged=request.year_built is None,
+            key, label, value, "percent", "estimated", f"share of GSR, {name}", flagged=not known
         )
+    return band.repairs_pct, band.reserves_pct
 
-    # Vacancy
+
+def _vacancy(
+    request: AnalyzeRequest, config: Config, market: MarketContext | None, out: _Assembly
+) -> float:
     if request.vacancy_rate is not None:
-        vacancy = request.vacancy_rate
-        out.line("vacancy_rate", "Vacancy", vacancy, "percent", "override", "entered")
-    else:
-        vacancy = unknown.vacancy_rate
+        out.line("vacancy_rate", "Vacancy", request.vacancy_rate, "percent", "override", "entered")
+        return request.vacancy_rate
+    housing = market.housing if market else None
+    rule = config.settings.underwriting.vacancy
+    if housing is not None and housing.rental_vacancy is not None:
+        vacancy = min(0.99, max(rule.floor, housing.rental_vacancy + rule.county_add))
         out.line(
             "vacancy_rate",
             "Vacancy",
             vacancy,
             "percent",
             "estimated",
-            "county vacancy not loaded: pessimistic stand-in",
+            f"{housing.vintage}: county rental vacancy {housing.rental_vacancy:.1%} "
+            f"+ {rule.county_add * 100:g} pt, floor {rule.floor:.0%}",
+            flagged=housing.stale,
+        )
+        return vacancy
+    vacancy = config.settings.when_unknown.vacancy_rate
+    out.line(
+        "vacancy_rate",
+        "Vacancy",
+        vacancy,
+        "percent",
+        "estimated",
+        "county vacancy not loaded: pessimistic stand-in",
+        flagged=True,
+    )
+    out.flag(
+        "vacancy_unknown",
+        "warning",
+        f"County vacancy is not loaded, so vacancy uses the stand-in of {vacancy:.0%}.",
+    )
+    return vacancy
+
+
+def _utilities(
+    request: AnalyzeRequest, config: Config, paid_by: PaidBy, said: bool, out: _Assembly
+) -> float:
+    label = "Owner-paid utilities"
+    if request.utilities_per_unit_month is not None:
+        out.line(
+            "utilities",
+            label,
+            request.utilities_per_unit_month,
+            "money_month",
+            "override",
+            "entered, per unit",
+        )
+        return request.utilities_per_unit_month
+    kind: Kind = "override" if said else "estimated"
+    origin = "entered" if said else "from settings"
+    if paid_by == "tenant":
+        out.line("utilities", label, 0.0, "money_month", kind, f"tenants pay, {origin}")
+        return 0.0
+    cost = config.settings.underwriting.utilities.owner_cost_per_unit_month
+    unknown = paid_by == "unknown"
+    out.line(
+        "utilities",
+        label,
+        cost,
+        "money_month",
+        kind,
+        ("unknown who pays: owner charged" if unknown else f"owner pays, {origin}") + ", per unit",
+        flagged=unknown,
+    )
+    if unknown:
+        out.flag(
+            "utilities_unknown",
+            "warning",
+            f"Who pays utilities is unknown, so the owner is charged ${cost:,.0f} per unit per "
+            "month.",
+        )
+    return cost
+
+
+def _insurance(
+    request: AnalyzeRequest,
+    config: Config,
+    market: MarketContext | None,
+    place: Place | None,
+    out: _Assembly,
+) -> float:
+    if request.insurance_per_unit_year is not None:
+        out.line(
+            "insurance",
+            "Insurance",
+            request.insurance_per_unit_year,
+            "money_year",
+            "override",
+            "entered, per unit",
+        )
+        return request.insurance_per_unit_year
+
+    rule = config.settings.underwriting.insurance
+    state = place.state if place else None
+    base = config.insurance_by_state.get(state or "", rule.per_unit_year)
+    source = f"placeholder for {state}" if state else "placeholder, state unknown"
+    risk = market.risk if market else None
+    if risk is not None:
+        high = risk.rating in config.settings.market.high_risk_ratings
+        multiplier = rule.high_risk_multiplier if high else 1.0
+        source += (f" x {multiplier:g}" if high else "") + f", hazard rating {risk.rating}"
+        if high:
+            out.flag(
+                "high_hazard",
+                "warning",
+                f"FEMA rates this county's natural-hazard risk {risk.rating}, so insurance is "
+                f"raised {multiplier:g}x.",
+            )
+    elif config.settings.when_unknown.high_hazard_county:
+        multiplier = rule.high_risk_multiplier
+        source += f" x {multiplier:g}, county hazard rating not loaded"
+    else:
+        multiplier = 1.0
+    insurance = base * multiplier
+    out.line(
+        "insurance",
+        "Insurance",
+        insurance,
+        "money_year",
+        "estimated",
+        source + ", per unit",
+        flagged=True,
+    )
+    out.flag(
+        "insurance_placeholder",
+        "warning",
+        f"Insurance is a placeholder of ${insurance:,.0f} per unit per year, not a quote.",
+    )
+    return insurance
+
+
+def _flood(request: AnalyzeRequest, config: Config, unit_count: int, out: _Assembly) -> float:
+    placeholder = config.settings.underwriting.flood_insurance_per_unit_year * unit_count
+    if request.flood_insurance_year is not None:
+        out.line(
+            "flood_insurance",
+            "Flood insurance",
+            request.flood_insurance_year,
+            "money_year",
+            "override",
+            "entered",
+        )
+        return request.flood_insurance_year
+    if request.in_flood_zone:
+        out.line(
+            "flood_insurance",
+            "Flood insurance",
+            placeholder,
+            "money_year",
+            "estimated",
+            "placeholder: in a flood zone",
             flagged=True,
         )
         out.flag(
-            "vacancy_unknown",
+            "flood_zone",
+            "red",
+            f"In a flood zone: flood insurance added at a placeholder ${placeholder:,.0f} a year.",
+        )
+        return placeholder
+    if request.in_flood_zone is None and config.settings.when_unknown.in_flood_zone:
+        out.line(
+            "flood_insurance",
+            "Flood insurance",
+            placeholder,
+            "money_year",
+            "estimated",
+            "flood zone not checked: charged anyway",
+            flagged=True,
+        )
+        out.flag(
+            "flood_unknown_charged",
             "warning",
-            f"County vacancy is not loaded, so vacancy uses the stand-in of {vacancy:.0%}.",
+            f"Flood zone not checked, so a placeholder ${placeholder:,.0f} a year is charged.",
+        )
+        return placeholder
+    if request.in_flood_zone is None:
+        out.flag(
+            "flood_not_checked", "info", "Flood zone not checked; no flood insurance is included."
+        )
+    return 0.0
+
+
+def _tax_rate(
+    request: AnalyzeRequest, config: Config, market: MarketContext | None, out: _Assembly
+) -> float:
+    label = "Property tax rate"
+    if request.tax_rate is not None:
+        out.line("tax_rate", label, request.tax_rate, "percent", "override", "entered")
+        return request.tax_rate
+    housing = market.housing if market else None
+    computed = housing.effective_tax_rate() if housing is not None else None
+    if housing is not None and computed is not None:
+        rate, method = computed
+        out.line(
+            "tax_rate",
+            label,
+            rate,
+            "percent",
+            "estimated",
+            f"{housing.vintage}, {housing.name}: {method}",
+            flagged=housing.stale,
+        )
+        if housing.top_coded:
+            out.flag(
+                "tax_rate_top_coded",
+                "info",
+                "The Census caps this county's median tax figure, so the rate uses total taxes "
+                "over total home value.",
+            )
+        return rate
+    rate = config.settings.when_unknown.tax_rate
+    out.line(
+        "tax_rate",
+        label,
+        rate,
+        "percent",
+        "estimated",
+        "county rate not loaded: pessimistic stand-in",
+        flagged=True,
+    )
+    out.flag(
+        "tax_rate_unknown",
+        "warning",
+        f"The county tax rate is not loaded, so taxes use the stand-in of {rate:.2%} of price.",
+    )
+    return rate
+
+
+def _market_notes(
+    units: tuple[Unit, ...], config: Config, market: MarketContext | None, out: _Assembly
+) -> None:
+    """Flags about the market data itself: a rent sanity check, sources that are missing or
+    served from an expired cache."""
+    if market is None:
+        return
+    index = market.rent_index
+    if index is not None:
+        average = sum(unit.pro_forma_rent for unit in units) / len(units)
+        if average > index.level * (1 + config.settings.market.rent_check_tolerance):
+            out.flag(
+                "rent_above_index",
+                "warning",
+                f"Rents average ${average:,.0f} a unit, {average / index.level - 1:.0%} above "
+                f"Zillow's typical rent of ${index.level:,.0f} for this {index.geography}. "
+                "Check them against real comparables.",
+            )
+    missing = market.missing()
+    if missing:
+        out.flag(
+            "market_data_missing",
+            "info",
+            "Not connected: " + "; ".join(f"{s.label} ({s.detail})" for s in missing) + ".",
+        )
+    stale = [status.label for status in market.sources if status.state == "stale"]
+    if stale:
+        out.flag(
+            "market_data_stale",
+            "warning",
+            f"Using an older cached copy because the refresh failed: {', '.join(stale)}.",
         )
 
-    # Management
+
+def assemble_deal(
+    request: AnalyzeRequest, config: Config, market: MarketContext | None = None
+) -> tuple[DealInputs, list[InputLine], list[Flag], Place | None]:
+    """Build engine inputs plus the list of where each one came from."""
+    underwriting = config.settings.underwriting
+    out = _Assembly()
+
+    out.line("price", "Price", request.price, "money", "actual", "entered")
+    place = _locate(request, out)
+    paid_by, said = _who_pays_utilities(request, config)
+    units = _units(request, config, market, paid_by, out)
+    unit_count = len(units)
+    repairs_pct, reserves_pct = _age_band(request, config, out)
+    vacancy = _vacancy(request, config, market, out)
+
     mode = request.management or underwriting.management.mode
     management_pct = underwriting.management.pct_for(mode)
     out.line(
@@ -310,152 +629,10 @@ def assemble_deal(
         + (", entered" if request.management else ", from settings"),
     )
 
-    # Utilities
-    if request.utilities_per_unit_month is not None:
-        utilities = request.utilities_per_unit_month
-        out.line(
-            "utilities",
-            "Owner-paid utilities",
-            utilities,
-            "money_month",
-            "override",
-            "entered, per unit",
-        )
-    else:
-        if request.tenants_pay_utilities is None:
-            paid_by = underwriting.utilities.paid_by
-            said = "from settings"
-        else:
-            paid_by = "tenant" if request.tenants_pay_utilities else "owner"
-            said = "entered"
-        kind: Kind = "estimated" if request.tenants_pay_utilities is None else "override"
-        if paid_by == "tenant":
-            utilities = 0.0
-            out.line(
-                "utilities",
-                "Owner-paid utilities",
-                utilities,
-                "money_month",
-                kind,
-                f"tenants pay, {said}",
-            )
-        else:
-            utilities = underwriting.utilities.owner_cost_per_unit_month
-            is_unknown = paid_by == "unknown"
-            out.line(
-                "utilities",
-                "Owner-paid utilities",
-                utilities,
-                "money_month",
-                kind,
-                ("unknown who pays: owner charged" if is_unknown else f"owner pays, {said}")
-                + ", per unit",
-                flagged=is_unknown,
-            )
-            if is_unknown:
-                out.flag(
-                    "utilities_unknown",
-                    "warning",
-                    "Who pays utilities is unknown, so the owner is charged "
-                    f"${utilities:,.0f} per unit per month.",
-                )
-
-    # Hazard insurance
-    if request.insurance_per_unit_year is not None:
-        insurance = request.insurance_per_unit_year
-        out.line("insurance", "Insurance", insurance, "money_year", "override", "entered, per unit")
-    else:
-        state = place.state if place else None
-        base = config.insurance_by_state.get(state or "", underwriting.insurance.per_unit_year)
-        multiplier = (
-            underwriting.insurance.high_risk_multiplier if unknown.high_hazard_county else 1
-        )
-        insurance = base * multiplier
-        source = f"placeholder for {state}" if state else "placeholder, state unknown"
-        if multiplier != 1:
-            source += f" x {multiplier:g}, county hazard rating not loaded"
-        out.line(
-            "insurance",
-            "Insurance",
-            insurance,
-            "money_year",
-            "estimated",
-            source + ", per unit",
-            flagged=True,
-        )
-        out.flag(
-            "insurance_placeholder",
-            "warning",
-            f"Insurance is a placeholder of ${insurance:,.0f} per unit per year, not a quote.",
-        )
-
-    # Flood insurance
-    flood_placeholder = underwriting.flood_insurance_per_unit_year * unit_count
-    if request.flood_insurance_year is not None:
-        flood = request.flood_insurance_year
-        out.line("flood_insurance", "Flood insurance", flood, "money_year", "override", "entered")
-    elif request.in_flood_zone:
-        flood = flood_placeholder
-        out.line(
-            "flood_insurance",
-            "Flood insurance",
-            flood,
-            "money_year",
-            "estimated",
-            "placeholder: in a flood zone",
-            flagged=True,
-        )
-        out.flag(
-            "flood_zone",
-            "red",
-            f"In a flood zone: flood insurance added at a placeholder ${flood:,.0f} a year.",
-        )
-    elif request.in_flood_zone is None and unknown.in_flood_zone:
-        flood = flood_placeholder
-        out.line(
-            "flood_insurance",
-            "Flood insurance",
-            flood,
-            "money_year",
-            "estimated",
-            "flood zone not checked: charged anyway",
-            flagged=True,
-        )
-        out.flag(
-            "flood_unknown_charged",
-            "warning",
-            f"Flood zone not checked, so a placeholder ${flood:,.0f} a year is charged.",
-        )
-    else:
-        flood = 0.0
-        if request.in_flood_zone is None:
-            out.flag(
-                "flood_not_checked",
-                "info",
-                "Flood zone not checked; no flood insurance is included.",
-            )
-
-    # Property taxes
-    if request.tax_rate is not None:
-        tax_rate = request.tax_rate
-        out.line("tax_rate", "Property tax rate", tax_rate, "percent", "override", "entered")
-    else:
-        tax_rate = unknown.tax_rate
-        out.line(
-            "tax_rate",
-            "Property tax rate",
-            tax_rate,
-            "percent",
-            "estimated",
-            "county rate not loaded: pessimistic stand-in",
-            flagged=True,
-        )
-        out.flag(
-            "tax_rate_unknown",
-            "warning",
-            f"The county tax rate is not loaded, so taxes use the stand-in of {tax_rate:.2%} "
-            "of price.",
-        )
+    utilities = _utilities(request, config, paid_by, said, out)
+    insurance = _insurance(request, config, market, place, out)
+    flood = _flood(request, config, unit_count, out)
+    tax_rate = _tax_rate(request, config, market, out)
     if request.tax_bill is not None:
         out.line(
             "tax_bill",
@@ -465,7 +642,6 @@ def assemble_deal(
             "actual",
             "entered; taxes never go below it",
         )
-
     if request.hoa_month:
         out.line("hoa", "HOA dues", request.hoa_month, "money_month", "actual", "entered")
     out.line(
@@ -476,12 +652,12 @@ def assemble_deal(
         "estimated",
         "default, per unit",
     )
-
     closing = request.closing_cost_pct
+    closing_pct = underwriting.closing_cost_pct if closing is None else closing
     out.line(
         "closing_cost_pct",
         "Closing costs",
-        underwriting.closing_cost_pct if closing is None else closing,
+        closing_pct,
         "percent",
         "estimated" if closing is None else "override",
         "default, share of price" if closing is None else "entered",
@@ -499,8 +675,8 @@ def assemble_deal(
         building_sqft=request.building_sqft,
         vacancy_rate=vacancy,
         management_pct=management_pct,
-        repairs_pct=band.repairs_pct,
-        reserves_pct=band.reserves_pct,
+        repairs_pct=repairs_pct,
+        reserves_pct=reserves_pct,
         utilities_per_unit_month=utilities,
         insurance_per_unit_year=insurance,
         flood_insurance_year=flood,
@@ -508,7 +684,7 @@ def assemble_deal(
         tax_floor=request.tax_bill or 0.0,
         hoa_month=request.hoa_month,
         misc_per_unit_year=underwriting.misc_per_unit_year,
-        closing_cost_pct=underwriting.closing_cost_pct if closing is None else closing,
+        closing_cost_pct=closing_pct,
         rehab=rehab,
         credits=request.credits,
     )
@@ -521,6 +697,7 @@ def assemble_deal(
             f"{underwriting.management.manager_pct:.0%} of EGI would cost about "
             f"${underwriting.management.manager_pct * egi:,.0f} a year.",
         )
+    _market_notes(units, config, market, out)
     return deal, out.lines, out.flags, place
 
 
@@ -546,20 +723,41 @@ def _terms(name: str, preset: Preset, rate: float, max_loan: float | None) -> Lo
     )
 
 
+def base_rate(
+    request: AnalyzeRequest, config: Config, market: MarketContext | None
+) -> tuple[float, str, bool]:
+    """(rate, where it came from, whether it should be flagged).
+
+    In order: the rate entered with the request, the manual rate in settings, the live 30-year
+    average, then the stand-in.
+    """
+    settings = config.settings
+    if request.base_rate is not None:
+        return request.base_rate, "base rate entered", False
+    if settings.financing.base_rate_manual is not None:
+        return settings.financing.base_rate_manual, "base rate from settings", False
+    live = market.mortgage_rate if market else None
+    if live is not None:
+        return live.rate, f"{live.source}, week of {short_date(live.as_of)}", live.stale
+    return settings.when_unknown.base_rate, "stand-in base rate", True
+
+
 def resolve_terms(
-    request: AnalyzeRequest, config: Config, unit_count: int, county_fips: str | None = None
+    request: AnalyzeRequest,
+    config: Config,
+    unit_count: int,
+    county_fips: str | None = None,
+    market: MarketContext | None = None,
 ) -> tuple[list[LoanTerms], dict[str, RateInfo], dict[str, str], set[str]]:
     """Pick the presets to run and decide each one's rate and loan limit.
 
-    A rate is, in order: the quote entered with the request, the preset's own quote from
-    settings, or the base rate plus the preset's spread. The base rate is the one entered, the
-    manual one from settings, or the stand-in, which is flagged.
+    A loan's rate is, in order: the quote entered with the request, the preset's own quote from
+    settings, or the base rate plus the preset's spread.
 
     The last item returned names the presets whose limit is a national minimum because the
     county is unknown or missing from the table.
     """
-    settings = config.settings
-    presets = settings.financing.presets
+    presets = config.settings.financing.presets
     requested = request.scenarios
     if requested:
         unknown_names = [name for name in requested if name not in presets]
@@ -567,21 +765,7 @@ def resolve_terms(
             raise AnalysisError(
                 f"Unknown scenario {', '.join(unknown_names)}. Choose from: {', '.join(presets)}."
             )
-
-    if request.base_rate is not None:
-        base, base_source, base_flagged = request.base_rate, "base rate entered", False
-    elif settings.financing.base_rate_manual is not None:
-        base, base_source, base_flagged = (
-            settings.financing.base_rate_manual,
-            "base rate from settings",
-            False,
-        )
-    else:
-        base, base_source, base_flagged = (
-            settings.when_unknown.base_rate,
-            "stand-in base rate",
-            True,
-        )
+    base, base_source, base_flagged = base_rate(request, config, market)
 
     terms: list[LoanTerms] = []
     rates: dict[str, RateInfo] = {}
@@ -617,11 +801,17 @@ def resolve_terms(
     return terms, rates, skipped, national_limit
 
 
-def analyze(request: AnalyzeRequest, config: Config) -> AnalysisResult:
-    """Underwrite one deal under every applicable loan preset."""
-    deal, lines, flags, place = assemble_deal(request, config)
+def analyze(
+    request: AnalyzeRequest, config: Config, market: MarketContext | None = None
+) -> AnalysisResult:
+    """Underwrite one deal under every applicable loan preset.
+
+    ``market`` is the market data for the deal's ZIP. Without it every gap falls back to the
+    stand-ins in settings, which is what happens offline with an empty cache.
+    """
+    deal, lines, flags, place = assemble_deal(request, config, market)
     terms_list, rates, skipped, national_limit = resolve_terms(
-        request, config, deal.unit_count, place.county_fips if place else None
+        request, config, deal.unit_count, place.county_fips if place else None, market
     )
     settings = config.settings
 
@@ -639,7 +829,8 @@ def analyze(request: AnalyzeRequest, config: Config) -> AnalysisResult:
         for terms in terms_list
     ]
 
-    if any(info.flagged for info in rates.values()):
+    live_rate = market.mortgage_rate if market else None
+    if any(info.flagged for info in rates.values()) and live_rate is None:
         flags.append(
             Flag(
                 code="rate_stand_in",
@@ -673,4 +864,6 @@ def analyze(request: AnalyzeRequest, config: Config) -> AnalysisResult:
         rates=rates,
         skipped=skipped,
         ranking_scenario=settings.buy_box.ranking_scenario,
+        market=market,
+        attributions=market.attributions if market else [],
     )

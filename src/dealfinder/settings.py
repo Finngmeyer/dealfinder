@@ -145,6 +145,31 @@ class Financing(Strict):
     presets: dict[str, Preset]
 
 
+class MarketSources(Strict):
+    fred: bool
+    hud_fmr: bool
+    acs: bool
+    zori: bool
+    nri: bool
+
+
+class CacheDays(Strict):
+    fred: float = Field(ge=0)
+    hud_fmr: float = Field(ge=0)
+    acs: float = Field(ge=0)
+    zori: float = Field(ge=0)
+    nri: float = Field(ge=0)
+
+
+class Market(Strict):
+    sources: MarketSources
+    acs_year: int
+    high_risk_ratings: list[str]
+    fmr_extra_bedroom_pct: float = Field(ge=0)
+    rent_check_tolerance: float = Field(ge=0)
+    cache_days: CacheDays
+
+
 class Settings(Strict):
     buy_box: BuyBox
     underwriting: Underwriting
@@ -152,6 +177,7 @@ class Settings(Strict):
     hold: HoldAssumptions
     sensitivity: list[Shock]
     financing: Financing
+    market: Market
 
 
 class CountyLimits(Strict):
@@ -225,6 +251,11 @@ class Environment(BaseSettings):
     dealfinder_config_dir: Path | None = None
     dealfinder_data_dir: Path = Path("data")
     dealfinder_db_url: str = "sqlite:///data/dealfinder.db"
+    dealfinder_offline: bool = False  # use cached data only; make no requests
+
+    @property
+    def cache_dir(self) -> Path:
+        return self.dealfinder_data_dir / "cache"
 
     def keys_set(self) -> dict[str, bool]:
         """Which credentials are present. Values are never returned."""
@@ -250,6 +281,14 @@ class Config(Strict):
     settings: Settings
     loan_limits: LoanLimits
     insurance_by_state: dict[str, float]
+    utility_allowance: dict[int, float]  # bedrooms -> dollars a month the tenant pays
+
+    def utility_allowance_for(self, bedrooms: float) -> float:
+        """Allowance for a bedroom count; sizes past the table use its largest row."""
+        if not self.utility_allowance:
+            return 0.0
+        beds = max(0, int(bedrooms))
+        return self.utility_allowance[min(beds, max(self.utility_allowance))]
 
 
 def find_config_dir(explicit: Path | None = None) -> Path:
@@ -317,6 +356,16 @@ def _load_insurance(path: Path) -> dict[str, float]:
         }
 
 
+def _load_utility_allowance(path: Path) -> dict[int, float]:
+    if not path.is_file():
+        return {}
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            return {int(row["bedrooms"]): float(row["per_month"]) for row in csv.DictReader(handle)}
+    except (KeyError, ValueError) as error:
+        raise SettingsError(f"{path} is not a valid utility allowance table: {error}") from error
+
+
 def _load_county_limits(path: Path) -> dict[str, CountyLimits]:
     """County FIPS -> limits, from the table built by scripts/build_loan_limits.py."""
     unit_counts = (1, 2, 3, 4)
@@ -364,4 +413,5 @@ def load_config(config_dir: Path | None = None) -> Config:
         settings=settings,
         loan_limits=loan_limits,
         insurance_by_state=_load_insurance(directory / "insurance_by_state.csv"),
+        utility_allowance=_load_utility_allowance(directory / "utility_allowance.csv"),
     )

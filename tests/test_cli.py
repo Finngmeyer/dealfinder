@@ -160,3 +160,121 @@ def test_settings_command_shows_files_and_key_status(monkeypatch):
     assert "RENTCAST_API_KEY: not set" in result.output
     assert "do-not-print-me" not in result.output
     assert "ranking_scenario: conv_investor" in result.output
+
+
+class TestMarketCommand:
+    def test_offline_with_an_empty_cache_still_reports(self):
+        result = runner.invoke(app, ["market", "--zip", "43215"], env=WIDE)
+        assert result.exit_code == 0, result.output
+        assert "43215 Franklin County, OH" in result.output
+        assert "offline and nothing is cached yet" in result.output
+        assert "HUD_API_TOKEN is not set" in result.output
+        assert "$1,136,750" in result.output  # county FHA limit comes from config, not the network
+        assert "stand-in" in result.output
+
+    def test_live_sources_are_shown(self, http_mock, monkeypatch):
+        from test_market_context import mock_everything
+
+        monkeypatch.delenv("DEALFINDER_OFFLINE")
+        monkeypatch.setenv("HUD_API_TOKEN", "hud-token")
+        monkeypatch.setenv("CENSUS_API_KEY", "census-key")
+        mock_everything(http_mock)
+        result = runner.invoke(app, ["market", "--zip", "43215"], env=WIDE)
+        assert result.exit_code == 0, result.output
+        for expected in (
+            "6.88%",  # base rate
+            "7.63%",  # conv_investor: base + 0.75
+            "$1,500",  # two-bedroom Small Area FMR
+            "$1,340",  # net of the utility allowance
+            "$1,560",  # Zillow index
+            "+4.0% over 12 months",
+            "1.44%",  # county tax rate
+            "6.40%",  # vacancy: 5.4% + 1 point
+            "Relatively High",
+            "This product uses the HUD User Data API but is not endorsed or certified by HUD User.",
+        ):
+            assert expected in result.output, expected
+
+    def test_refresh_downloads_again(self, http_mock, monkeypatch):
+        from test_market_context import mock_everything
+
+        monkeypatch.delenv("DEALFINDER_OFFLINE")
+        routes = mock_everything(http_mock)
+        runner.invoke(app, ["market", "--zip", "43215"], env=WIDE)
+        runner.invoke(app, ["market", "--zip", "43215"], env=WIDE)
+        assert routes["fred"].call_count == 1
+        runner.invoke(app, ["market", "--zip", "43215", "--refresh"], env=WIDE)
+        assert routes["fred"].call_count == 2
+
+    def test_json(self):
+        result = runner.invoke(app, ["market", "--zip", "43215", "--json"])
+        data = json.loads(result.output)
+        assert data["place"]["county_fips"] == "39049"
+        assert {source["key"] for source in data["sources"]} == {
+            "fred",
+            "hud_fmr",
+            "acs",
+            "zori",
+            "nri",
+        }
+
+    def test_not_a_zip(self):
+        result = runner.invoke(app, ["market", "--zip", "4321"])
+        assert result.exit_code == 2
+        assert "not a 5-digit ZIP" in result.output
+
+
+class TestAnalyzeWithMarketData:
+    def test_market_data_fills_the_gaps(self, http_mock, monkeypatch):
+        from test_market_context import mock_everything
+
+        monkeypatch.delenv("DEALFINDER_OFFLINE")
+        monkeypatch.setenv("HUD_API_TOKEN", "hud-token")
+        monkeypatch.setenv("CENSUS_API_KEY", "census-key")
+        mock_everything(http_mock)
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--price",
+                "480000",
+                "--rents",
+                "1350x4",
+                "--zip",
+                "43215",
+                "--beds",
+                "2x4",
+                "--scenario",
+                "conv_investor",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        deal = data["deal"]
+        assert deal["tax_rate"] == pytest.approx(0.0144)
+        assert deal["vacancy_rate"] == pytest.approx(0.064)
+        assert deal["insurance_per_unit_year"] == 1350  # Relatively High hazard rating
+        assert deal["units"][0]["market_rent"] == 1340
+        assert data["rates"]["conv_investor"]["rate"] == pytest.approx(0.0688 + 0.0075)
+        assert data["attributions"]
+
+    def test_no_market_flag_skips_the_lookup(self, http_mock, monkeypatch):
+        monkeypatch.delenv("DEALFINDER_OFFLINE")  # any request would now fail the test
+        result = runner.invoke(
+            app,
+            ["analyze", "--price", "480000", "--rents", "1350x4", "--zip", "43215", "--no-market"],
+            env=WIDE,
+        )
+        assert result.exit_code == 0, result.output
+        assert "Market data" not in result.output
+
+    def test_offline_flag(self, http_mock, monkeypatch):
+        monkeypatch.delenv("DEALFINDER_OFFLINE")
+        result = runner.invoke(
+            app,
+            ["analyze", "--price", "480000", "--rents", "1350x4", "--zip", "43215", "--offline"],
+            env=WIDE,
+        )
+        assert result.exit_code == 0, result.output
+        assert "offline and nothing is cached yet" in result.output

@@ -68,6 +68,24 @@ sensitivity:                     # each case moves one thing; add, remove or edi
   - {name: "Insurance +50%", insurance_factor: 1.5}
   - {name: "Taxes +25%", tax_factor: 1.25}
 
+market:
+  sources:                       # switch any free data source off here
+    fred: true                   # mortgage rate
+    hud_fmr: true                # Fair Market Rents; needs HUD_API_TOKEN
+    acs: true                    # county tax rate and rental vacancy; needs CENSUS_API_KEY
+    zori: true                   # Zillow rent index, used as a cross-check and for rent growth
+    nri: true                    # FEMA county hazard rating
+  acs_year: 2024                 # last year of the ACS 5-year window (2020-2024)
+  high_risk_ratings: [Relatively High, Very High]   # these get the insurance multiplier
+  fmr_extra_bedroom_pct: 0.15    # HUD's rule: each bedroom past four adds this share of the 4BR rent
+  rent_check_tolerance: 0.25     # flag rents this far above Zillow's typical rent for the area
+  cache_days:                    # how long a downloaded copy is reused before refreshing
+    fred: 1
+    hud_fmr: 30
+    acs: 365
+    zori: 30
+    nri: 180
+
 financing:
   loan_limit_year: 2026          # picks config/loan_limits/<year>.yaml
   base_rate_manual: null         # your own base rate, used instead of the 30-year average

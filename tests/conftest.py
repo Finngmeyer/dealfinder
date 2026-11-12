@@ -3,8 +3,11 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 
+from dealfinder.http import Fetcher
 from dealfinder.settings import Config, load_config
 from dealfinder.underwrite import DealInputs, HoldAssumptions, LoanTerms, MiTier, Targets, Unit
 
@@ -87,8 +90,28 @@ def config_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def http_mock():
+    """No test may reach the network: a request without a mocked route fails the test."""
+    with respx.mock(assert_all_called=False) as router:
+        yield router
+
+
+@pytest.fixture
+def fetcher(tmp_path: Path) -> Fetcher:
+    """A fetcher with its own empty cache that never really sleeps."""
+    return Fetcher(tmp_path / "cache", sleep=lambda seconds: None)
+
+
+def text_response(text: str, status: int = 200) -> httpx.Response:
+    return httpx.Response(status, text=text)
+
+
+@pytest.fixture(autouse=True)
 def _clean_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Keep a developer's real keys and .env out of the tests."""
+    """Keep a developer's real keys and .env out of the tests, and keep the command line
+    offline unless a test opts in."""
+    monkeypatch.setenv("DEALFINDER_OFFLINE", "1")
+    monkeypatch.delenv("DEALFINDER_DATA_DIR", raising=False)
     for name in (
         "RENTCAST_API_KEY",
         "HUD_API_TOKEN",
