@@ -1,0 +1,99 @@
+description,units,source_kind,stated_units,bedrooms,bathrooms,note
+"Fully rented 4-plex, each unit 2bd/1ba",4,,,,,spec
+Quadplex with separate meters,4,,,,,spec
+"Two fourplexes on one lot, sold together",8,,,,,spec
+4 units available in this 24-unit complex,24,,,,,spec
+Duplex with 4 bedrooms and a 4 car garage,2,,,,,spec
+Lot zoned for a fourplex,land,,,,,spec
+"Triplex plus detached ADU, 4 units total",4,,,,,spec
+"Unit 4 is vacant; units 1-3 leased at $1,100",4,,,,,spec
+"Investor special 4 unit building, cash only",4,,,,,spec
+Charming brick four-family in the heart of the village. Each unit has 2 bedrooms and 1 bath.,4,,,,,
+Great investment opportunity! This 4-unit property features four 1BR/1BA apartments with separate utilities.,4,,,,,
+"Legal 3 family with long term tenants. Unit 1: 2bd/1ba $1,200. Unit 2: 2bd/1ba $1,150. Unit 3: 1bd/1ba $950.",3,,,,,
+"Side-by-side duplex. Each side has 3 bedrooms, 1.5 baths. Live in one unit and rent the other.",2,,,,,
+"Triple decker! Three 3-bedroom units, all with hardwood floors.",3,,,,,
+Classic Chicago two-flat with garden unit potential. Zoning allows for 3 units.,2,,,,,
+Fourplex on a quiet street. 2 units recently renovated. Coin laundry on site.,4,,,,,
+"Six-unit apartment building, fully occupied. Gross rents $5,400/month.",6,,,,,
+"Well maintained 4plex. Rents are $900, $925, $950 and $975.",4,,,,,
+"Two duplexes on adjoining lots, sold as a package. 4 units total.",4,,,,,
+Duplex plus bonus studio apartment in the basement (not conforming). Three units in all.,3,,,,,
+"Vacant land. 0.25 acres zoned R-4, approved for 4 units.",land,,,,,
+Large Victorian converted to 4 apartments. Separate entrances and meters.,4,,,,,
+Fourplex. All four units are 2/1 with in-unit laundry.,4,,,,,
+4 bed 2 bath single family home near the park.,1,sfr,,4,2,
+Updated condo in a 12-unit building. HOA covers water.,1,condo,,2,1,
+"Townhouse-style duplex: 2 units, each 3BR/1.5BA.",2,,,,,
+"Income property! 2-family with separate utilities. First floor: 2 bed, 1 bath. Second floor: 3 bed, 1 bath.",2,,,,,
+Brick 6-flat in Logan Square. All units 2bd/1ba.,6,,,,,
+"Great opportunity to own a quadruplex! Each unit is 1 bed / 1 bath, approx 650 sqft.",4,,,,,
+Seller will consider all offers on this triplex. Unit A: 2BR. Unit B: 2BR. Unit C: studio.,3,,,,,
+Portfolio sale: three fourplexes (12 units) on contiguous lots.,12,,,,,
+"Duplex. One unit is owner occupied, the other rents for $1,400.",2,,,,,
+"This is a 4 bedroom, 2 bath home with a finished basement. Could be converted to a duplex.",1,sfr,,4,2,
+"Multi-family home with 3 units. Two units rented, third unit vacant and ready for owner.",3,,,,,
+"FOUR UNIT building in great location, separate gas & electric meters.",4,,,,,
+Four-plex with 8 total bedrooms.,4,,,,,
+Building has 5 units: four 1-bedroom apartments and one studio.,5,,,,,
+Three unit multifamily. Great cash flow. Tenants pay all utilities.,3,,,,,
+Rare find: legal four family home with 2 car garage. Each apartment has 2 bedrooms.,4,,,,,
+Land for sale. Perfect for a duplex or triplex build.,land,,,,,
+"Two family house. 1st floor 3 rooms, 2nd floor 5 rooms.",2,,,,,
+"3-family. Units 1 and 2 rented at $1,300; unit 3 at $1,450.",3,,,,,
+4 unit apartment building. 2 units have been updated with new kitchens.,4,,,,,
+"Duplex down, owner's unit up. Detached garage.",2,,,,,
+Fully leased fourplex with four separate electric meters and four water heaters.,4,,,,,
+"Two-unit building: front unit 2/1, rear unit 1/1.",2,,,,,
+Not a fourplex! This oversized duplex lives like two houses.,2,,,,,
+"Up/down duplex with separate entrances. Lower unit: 2 beds, 1 bath. Upper unit: 3 beds, 1 bath.",2,,,,,
+This 4-unit is a cash cow.,4,,,,,
+"Investors! 4 unit, fully rented, gross income $4,000/mo",4,,,,,
+Tri-plex in historic district,3,,,,,
+"Fourplex - two buildings, each a duplex",4,,,,,
+Duplex and triplex sold together on double lot,5,,,,,
+"12 unit apartment complex, 100% occupied.",12,,,,,
+Legal 2 family + finished attic,2,,,,,
+"4 units. Unit 1 - $900, Unit 2 - $950, Unit 3 - $925, Unit 4 - vacant.",4,,,,,
+Corner lot. Fourplex with off-street parking for 6 cars.,4,,,,,
+Great rental history and newer roof.,unknown,multifamily_2_4,,8,4,bed/bath pattern only
+Solid brick building near transit. New boiler 2022.,4,multifamily_2_4,4,8,4,structured count
+Solid brick building near transit. New boiler 2022.,unknown,multifamily_2_4,,,,nothing to go on
+"Spacious duplex, each unit 2 bed 1 bath, plus room to add a third unit in the attic.",2,,,,,
+"Existing triplex; plans approved for 6 units.",3,,,,,
+"Four 2 bed 1 bath units, all rented at $1,050.",4,,,,,
+"Two 2BR/1BA units and two 1BR/1BA units, separately metered.",4,,,,,
+Quad with strong rental history.,unknown,multifamily_2_4,,,,bare quad is not a count
+"4-family, 4 gas meters, 4 electric meters, 4 furnaces.",4,,,,,
+"Live in one unit and let the other three pay your mortgage in this fourplex.",4,,,,,
+"Unit 2 has a $5,000 kitchen remodel. Great triplex.",3,,,,,
+Vacant lot zoned multifamily. Build up to 4 units.,land,,,,,
+"Beautiful 2 unit home, could be 3 units with attic build-out.",2,,,,,
+"3 of the 4 units are currently rented.",4,,,,,
+"Two-family: 1st floor rents $1,500 and 2nd floor rents $1,650.",2,,,,,
+"End unit townhome in a fourplex-style building, one of four attached units.",1,townhouse,,3,2.5,adversarial
+"This listing is for Unit 4 only. Building has 4 units total.",1,condo,,2,1,adversarial
+Single family home on 4 acres with a 4 stall barn.,1,sfr,,3,2,adversarial
+Duplex. Upper unit has 4 bedrooms; lower unit has 2.,2,,,,,adversarial
+Triplex with 4 parking spaces and 4 storage units in the basement.,3,,,,,adversarial
+Fourplex-zoned lot for sale in a growing area.,land,,,,,adversarial
+Former duplex converted back to a single family home.,unknown,other,,,,adversarial
+"Duplex with long-term tenants. Adjacent fourplex also for sale, see MLS.",2,,,,,adversarial
+Adjacent fourplex also available. This duplex has two 2BR units.,2,,,,,adversarial
+"Zoning: duplex/triplex/fourplex allowed. Existing structure is a two-family.",2,,,,,adversarial
+Brick two-family. Up to 4 units allowed per zoning.,2,,,,,adversarial
+Retail building with 4 units and ample parking.,unknown,other,,,,adversarial commercial
+Mixed-use: storefront plus 3 apartments upstairs.,unknown,other,,,,adversarial commercial
+Three 4-plexes sold as a package.,12,,,,,adversarial
+"Legal duplex, 4 units possible with variance.",2,,,,,adversarial
+Each of the 3 units has 4 rooms and 1 bath.,3,,,,,adversarial
+"Triplex. Unit 1 4BR/2BA, Unit 2 2BR/1BA, Unit 3 1BR/1BA.",3,,,,,adversarial
+Was a fourplex; now a duplex after renovation.,2,,,,,adversarial
+"Fourplex! Units 1-4 each rent for $1,200.",4,,,,,adversarial
+"Quadplex, one building, 4 units, 4 meters, 4 leases.",4,,,,,adversarial
+"Duplex, each unit 4 bed 2 bath.",2,,,,,adversarial
+"Great fourplex alternative: this triplex cash flows better.",3,,,,,adversarial
+"4-plex. Two units are 2/1 and two units are 1/1.",4,,,,,adversarial
+"Sixplex with 4 units updated in 2023.",6,,,,,adversarial
+"Bring your investors: 2 units down, 2 units up, 4 units in all.",4,,,,,adversarial
+"Two-family with potential for a third unit in the walk-up attic. 4 bedrooms total.",2,,,,,adversarial

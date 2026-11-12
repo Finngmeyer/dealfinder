@@ -208,6 +208,31 @@ class Dedupe(Strict):
     price_tolerance: float = Field(ge=0, lt=1)
 
 
+class LlmSettings(Strict):
+    enabled: bool
+    model: str
+    effort: Literal["low", "medium", "high", "xhigh", "max"]
+    max_tokens: int = Field(ge=256)
+    only_below_confidence: Literal["high", "medium"]
+    max_calls_per_run: int = Field(ge=0)
+
+
+class Classify(Strict):
+    rehab_by_flag: dict[str, list[str]]  # rehab level -> flags that trigger it
+    property_record_cache_days: float = Field(ge=0)
+    llm: LlmSettings
+
+    def rehab_level(self, flags: list[str]) -> str:
+        """The costliest rehab level any of the flags calls for, else "none"."""
+        triggered = [
+            level for level, names in self.rehab_by_flag.items() if set(names) & set(flags)
+        ]
+        for level in ("heavy", "light"):
+            if level in triggered:
+                return level
+        return triggered[0] if triggered else "none"
+
+
 class Settings(Strict):
     buy_box: BuyBox
     underwriting: Underwriting
@@ -221,6 +246,7 @@ class Settings(Strict):
     rentcast_plans: dict[str, Plan]
     sweep: Sweep
     dedupe: Dedupe
+    classify: Classify
 
 
 class CountyLimits(Strict):
@@ -325,6 +351,7 @@ class Config(Strict):
     loan_limits: LoanLimits
     insurance_by_state: dict[str, float]
     utility_allowance: dict[int, float]  # bedrooms -> dollars a month the tenant pays
+    keywords: dict[str, list[str]]  # flag -> phrases that raise it
 
     def utility_allowance_for(self, bedrooms: float) -> float:
         """Allowance for a bedroom count; sizes past the table use its largest row."""
@@ -334,14 +361,14 @@ class Config(Strict):
         return self.utility_allowance[min(beds, max(self.utility_allowance))]
 
 
-def find_config_dir(explicit: Path | None = None) -> Path:
+def find_config_dir(explicit: Path | str | None = None) -> Path:
     """Where the configuration lives.
 
     A directory named explicitly or through $DEALFINDER_CONFIG_DIR must hold the settings file;
     pointing somewhere wrong is an error, never a quiet fall back to a different configuration.
     With nothing named, ./config is used, then the project's own config directory.
     """
-    named = explicit or Environment().dealfinder_config_dir
+    named = Path(explicit) if explicit else Environment().dealfinder_config_dir
     if named is not None:
         if (named / SETTINGS_FILE).is_file():
             return named
@@ -409,6 +436,15 @@ def _load_utility_allowance(path: Path) -> dict[int, float]:
         raise SettingsError(f"{path} is not a valid utility allowance table: {error}") from error
 
 
+def _load_keywords(path: Path) -> dict[str, list[str]]:
+    if not path.is_file():
+        return {}
+    data = _read_yaml(path)
+    if not all(isinstance(phrases, list) for phrases in data.values()):
+        raise SettingsError(f"{path}: each flag needs a list of phrases")
+    return {str(flag): [str(phrase) for phrase in phrases] for flag, phrases in data.items()}
+
+
 def _load_county_limits(path: Path) -> dict[str, CountyLimits]:
     """County FIPS -> limits, from the table built by scripts/build_loan_limits.py."""
     unit_counts = (1, 2, 3, 4)
@@ -425,7 +461,7 @@ def _load_county_limits(path: Path) -> dict[str, CountyLimits]:
         raise SettingsError(f"{path} is not a valid county limit table: {error}") from error
 
 
-def load_config(config_dir: Path | None = None) -> Config:
+def load_config(config_dir: Path | str | None = None) -> Config:
     directory = find_config_dir(config_dir)
     files = [directory / SETTINGS_FILE]
     data = _read_yaml(files[0])
@@ -457,4 +493,5 @@ def load_config(config_dir: Path | None = None) -> Config:
         loan_limits=loan_limits,
         insurance_by_state=_load_insurance(directory / "insurance_by_state.csv"),
         utility_allowance=_load_utility_allowance(directory / "utility_allowance.csv"),
+        keywords=_load_keywords(directory / "keywords.yaml"),
     )

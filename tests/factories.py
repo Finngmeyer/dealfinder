@@ -70,3 +70,24 @@ def listing(number: int = 1, **changes: Any) -> Listing:
     }
     fields.update(changes)
     return Listing(**fields)
+
+
+def rentcast_property(number: int, **changes: Any) -> dict[str, Any]:
+    """One property record as RentCast returns it, for the listing ``rentcast_record(number)``."""
+    record: dict[str, Any] = {
+        "id": f"{100 + number}-Sample-St,-Columbus,-OH-43215",
+        "formattedAddress": f"{100 + number} Sample St, Columbus, OH 43215",
+        "propertyType": "Multi-Family",
+        "bedrooms": 8,
+        "bathrooms": 4,
+        "squareFootage": 3600,
+        "yearBuilt": 1978,
+        "features": {"unitCount": 4, "heating": True},
+        "propertyTaxes": {
+            "2024": {"year": 2024, "total": 5510},
+            "2025": {"year": 2025, "total": 5760},
+        },
+        "ownerOccupied": False,
+    }
+    record.update(changes)
+    return record

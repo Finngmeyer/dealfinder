@@ -118,6 +118,19 @@ dedupe:
   radius_m: 30                   # same property if this close and...
   price_tolerance: 0.05          # ...priced within this share of each other
 
+classify:
+  rehab_by_flag:                 # listing tags (config/keywords.yaml) that add a rehab budget,
+    light: [tlc, needs_work]     # using underwriting.rehab_per_unit for the level
+    heavy: [as_is, fixer, cash_only]
+  property_record_cache_days: 180   # RentCast property records (unit count, tax bill) are reused this long
+  llm:                           # optional reading of descriptions by Claude; needs ANTHROPIC_API_KEY
+    enabled: false
+    model: claude-haiku-5-5
+    effort: low
+    max_tokens: 4000
+    only_below_confidence: high  # ask only when the rules are less sure than this: high | medium
+    max_calls_per_run: 200
+
 financing:
   loan_limit_year: 2026          # picks config/loan_limits/<year>.yaml
   base_rate_manual: null         # your own base rate, used instead of the 30-year average

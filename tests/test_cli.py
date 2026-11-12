@@ -338,10 +338,25 @@ class TestSweepCommands:
         assert "Requests billed now: 1. This billing period: 1 of 50." in swept.output
         assert "Listings seen 3; new 3" in swept.output
 
+        # RentCast gives no unit count, so nothing is a confirmed fourplex yet: 8 bedrooms and
+        # 4 baths only hint at one.
+        assert "0 confirmed, 3 with an unconfirmed unit count" in swept.output
         listed = runner.invoke(app, ["listings", "--state", "oh"], env=WIDE)
         assert listed.exit_code == 0, listed.output
-        assert "101 Sample St, Columbus, OH, 43215" in listed.output
-        assert "$401,000" in listed.output and "multifamily 2 4" in listed.output
+        assert "fourplex: 0 confirmed, 3 with an unconfirmed unit count, 0 of other kinds" in (
+            listed.output
+        )
+        assert "Sample St" not in listed.output and "--unverified" in listed.output
+
+        maybes = runner.invoke(app, ["listings", "--state", "oh", "--unverified"], env=WIDE)
+        assert "101 Sample St, Columbus, OH, 43215" in maybes.output
+        assert "$401,000" in maybes.output and "4?" in maybes.output
+        assert "resolve-units" in maybes.output
+
+        everything = runner.invoke(app, ["listings", "--types", "all"], env=WIDE)
+        assert everything.output.count("Sample St") == 3
+        unknown = runner.invoke(app, ["listings", "--types", "castle"], env=WIDE)
+        assert unknown.exit_code == 2 and "Unknown property type castle" in unknown.output
 
         usage = runner.invoke(app, ["usage"], env=WIDE)
         assert usage.exit_code == 0, usage.output
@@ -406,7 +421,7 @@ class TestSweepCommands:
     def test_listings_on_an_empty_database(self, engine):
         result = runner.invoke(app, ["listings"])
         assert result.exit_code == 0
-        assert "No listings stored yet" in result.output
+        assert "Nothing stored yet" in result.output
 
 
 class TestImportCommand:

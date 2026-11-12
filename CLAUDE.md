@@ -5,9 +5,15 @@ Local-first Python app that finds small multifamily listings (fourplexes by defa
 
 ## Current phase
 
-**Phases 1 to 3 are built.** Next is Phase 4. Each phase ends with passing tests, a demo
+**Phases 1 to 4 are built.** Next is Phase 5. Each phase ends with passing tests, a demo
 command and a commit. The standing rule is to stop for the owner's OK after each phase; on
 November 12 the owner said to keep working through the phases while they were away.
+
+Phase 4's bar of 95% fourplex precision on 50 real labeled descriptions is not met yet, only
+because there is no real data: `tests/test_classifier_labeled.py` skips until
+`data/labeled/descriptions.csv` exists. The classifier scores 100% on the 98 made-up
+descriptions in `tests/fixtures/descriptions_synthetic.csv`. When the owner's MLS export
+arrives: `import-csv`, then `label-sheet`, fill in the blank `units` cells, run the tests.
 
 Not yet checked against the live services, because they need the owner's keys: HUD rents
 (`HUD_API_TOKEN`), Census ACS (`CENSUS_API_KEY`) and RentCast (`RENTCAST_API_KEY`). All three
@@ -22,7 +28,7 @@ stored rows against `raw_json`.
 | 1 | Underwriting engine, financing presets, `analyze` CLI, golden test, no network | built |
 | 2 | FRED, HUD FMR/SAFMR, ACS, ZORI, FEMA NRI clients with disk cache; `market --zip` | built; HUD and ACS unverified live |
 | 3 | RentCast adapter, SQLite + Alembic, dedupe, budget guard, `--dry-run`, CSV import, inventory probe | built; RentCast unverified live |
-| 4 | Property-record step for unit counts, text classifier, type toggles, optional LLM extraction | next |
+| 4 | Property-record step for unit counts, text classifier, type toggles, optional LLM extraction | built; real-data precision test waiting for the owner's export; Claude step unverified live |
 | 5 | Stage-2 enrichment, scoring, buy box, Streamlit dashboard | |
 | 6 | Scheduler, alerts, exports, optional scraper adapters, README | |
 
@@ -39,7 +45,14 @@ uv run dealfinder sweep --mode weekly --states OH --dry-run   # expected request
 uv run dealfinder sweep --mode weekly --states OH             # fetch, within the request cap
 uv run dealfinder probe --states OH,IN    # one request per state: count the inventory
 uv run dealfinder import-csv examples/sample_mls_export.csv --mapping sample
-uv run dealfinder listings --status all   # what is stored
+uv run dealfinder listings                # stored listings of the buy box's property types
+uv run dealfinder listings --unverified   # might be a wanted type; unit count not confirmed
+uv run dealfinder listings --types all --status all   # everything
+uv run dealfinder classify "Unit 4 is vacant; units 1-3 leased at \$1,100" --beds 8   # read one description
+uv run dealfinder classify-all            # reclassify what changed (--llm: Claude reads the unsure ones)
+uv run dealfinder resolve-units --dry-run # RentCast property records for unconfirmed unit counts
+uv run dealfinder label-sheet             # stored descriptions -> data/labeled/descriptions.csv
+uv run dealfinder classify-eval data/labeled/descriptions.csv   # score the classifier on labeled text
 uv run dealfinder usage                   # request budget and recent runs
 uv run python scripts/build_zip_county.py        # rebuild the bundled ZIP-to-county data
 uv run python scripts/build_loan_limits.py 2027  # county loan limits for a new year (add 2027.yaml first)
@@ -47,7 +60,9 @@ uv run python scripts/build_loan_limits.py 2027  # county loan limits for a new 
 
 Schema change: edit `store/tables.py`, run `uv run alembic revision --autogenerate -m "..."`,
 then in the new file replace `dealfinder.store.tables.UtcDateTime()` with `sa.DateTime()`.
-The app upgrades its database on start.
+The app upgrades its database on start. Until the first push to the owner's repository there
+is only migration 0001, rebuilt with `scripts/regenerate_initial_migration.sh`; after that,
+never rebuild it: add migrations.
 
 `analyze` and `market` read market data from `data/cache` and the network. `--offline` uses the
 cache only, `analyze --no-market` skips market data, `market --refresh` downloads again.
@@ -83,7 +98,9 @@ src/dealfinder/http.py          Fetcher: every request goes through it (cache, r
 src/dealfinder/models.py        canonical Listing and the ListingSource interface
 src/dealfinder/adapters/        listing sources: rentcast.py, csv_import.py
 src/dealfinder/store/           tables.py, db.py, migrations/, repo.py, dedupe.py, usage.py
-src/dealfinder/pipeline/        sweep.py (plan, run, resume, probe), importer.py
+src/dealfinder/pipeline/        sweep.py (plan, run, resume, probe), importer.py, classify.py
+src/dealfinder/classify/        patterns, classifier, unit_mix, rents, keywords, llm, evaluate
+config/keywords.yaml            phrases that tag a listing (as-is, cash only, motivated, ...)
 src/dealfinder/market/          one module per free source, plus context.py (all of them for a ZIP)
 src/dealfinder/analysis.py      builds engine inputs from a request + market data + settings
 src/dealfinder/settings.py      loads config; Environment holds secrets and paths
@@ -120,14 +137,31 @@ data/                           runtime: database, cache, imports, labeled text 
   key to disk: pass keys as `secret_params` or headers. A source problem raises
   `SourceUnavailable` with a reason a person can act on; nothing else should escape a source.
 - **Metered requests pass the budget guard.** `BudgetGuard.check` runs as the fetcher's
-  `before_send`, so it fires only for a real request, and `record` follows each billed one in
-  its own transaction. Cached pages are free and uncounted. The cap is
+  `before_send`, so it fires only for a real request, and `record` runs as `on_success` the
+  moment an HTTP 200 arrives, in its own transaction, so a billed response is counted even if
+  its body is unusable. Cached pages are free and uncounted. The cap is
   `budgets.rentcast.monthly_request_cap`, counted from `billing_cycle_day`.
 - **Sweeps are idempotent and resumable.** One transaction per page stores the listings and
   the checkpoint together. `upsert_listing` only adds a price event when something changed.
   Listings go off-market only after a complete weekly sweep of their state.
 - **Dedupe:** normalized address first, then within 30 m and 5% on price. Units are dropped
   from the address key except for condos.
+- **The classifier owns kind and unit count.** `classify/` is pure: structured facts and a
+  description in, a `Classification` out (kind, unit count, confidence, evidence quoted from
+  the listing, tags, units with any stated rents). `pipeline/classify.py` stores it and sets
+  `properties.property_kind / unit_count / unit_confidence`; `upsert_listing` only writes
+  stand-ins there while `unit_confidence` is null. A fourplex is 4 units at medium or high
+  confidence. Anything that might be a wanted type but is not confirmed is "unverified" and
+  listed separately (`kind_matches`). Imports and sweeps classify on their own.
+- **Classification is skipped when nothing changed.** `classifications.input_hash` covers the
+  classifier's inputs, the keyword lists and `CLASSIFIER_VERSION`; bump the version when a
+  rule changes so everything is read again. Units are updated in place and keep their market
+  rent unless their layout changed.
+- **Claude never adds an unquoted fact.** The optional step (`classify.llm`, off by default)
+  asks for JSON plus the verbatim words for every number; `checked()` drops any number whose
+  quote is not in the description or does not contain it. It fills gaps and never overrules
+  a count the rules hold at medium or better. Each description is sent at most once
+  (`method` becomes `rules+llm`), capped by `classify.llm.max_calls_per_run`.
 - **Tests never touch the network.** An autouse fixture fails any request without a mocked
   route, and `DEALFINDER_OFFLINE=1` is set for every test. Fixtures are synthetic.
 - **No real data in git.** No API responses, listing text, MLS remarks or personal buy-box
@@ -178,8 +212,16 @@ data/                           runtime: database, cache, imports, labeled text 
   `limit` max 500, `X-Total-Count` with `includeTotalCount=true` (slow: first page only),
   results sorted by `lastSeenDate` descending, 20 requests/second, only HTTP 200 is billed,
   no hard usage cap. Listing `id` is address-based and matches the property-record id.
-- RentCast `GET /v1/properties` has `features.unitCount`, `propertyTaxes[year].total`,
-  `ownerOccupied`. Fill rate of `unitCount` is unknown: sample 50 before relying on it.
+- RentCast `GET /v1/properties/{id}` has `features.unitCount`, `propertyTaxes[year].total`,
+  `ownerOccupied`; a missing record is a 404 and is not billed. Fill rate of `unitCount` is
+  unknown: sample 50 before relying on it. `resolve-units` stores each lookup under
+  `_property_record` in the listing's `raw_json` and never repeats it.
+- **Anthropic SDK** 2.8 (dev dependency; optional extra `llm` for users) is built on `httpx2`,
+  so respx does not see it: tests pass `http_client=httpx2.Client(transport=MockTransport)`.
+  The call is `client.messages.create(model, max_tokens, system, messages,
+  output_config={"effort": ..., "format": {"type": "json_schema", "schema": ...}})`; read the
+  block whose `type` is `text` (a thinking block may come first) and treat any `stop_reason`
+  other than `end_turn` as no answer.
 - RentCast `GET /v1/avm/rent/long-term` prices ONE unit for Multi-Family. Always send
   `lookupSubjectAttributes=false` with the unit's own beds, baths and sqft, or it fills
   missing attributes from the whole building.

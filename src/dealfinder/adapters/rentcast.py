@@ -15,6 +15,9 @@ import math
 from collections.abc import Callable, Iterator, Sequence
 from datetime import date, datetime, timedelta
 from typing import Any
+from urllib.parse import quote
+
+from pydantic import BaseModel
 
 from dealfinder.http import Fetcher, SourceUnavailable
 from dealfinder.models import CallEstimate, Geo, Listing, PriceChange, PropertyKind, RawPage
@@ -24,6 +27,7 @@ from dealfinder.store.usage import BudgetGuard
 SOURCE = "rentcast"
 BASE_URL = "https://api.rentcast.io/v1"
 LISTINGS_URL = f"{BASE_URL}/listings/sale"
+PROPERTIES_URL = f"{BASE_URL}/properties"
 TOTAL_HEADER = "X-Total-Count"
 
 # Buy-box property type -> RentCast's propertyType.
@@ -138,6 +142,54 @@ def to_listing(raw: dict[str, Any]) -> Listing:
     )
 
 
+class PropertyRecord(BaseModel):
+    """What RentCast's property record adds to a listing: the unit count and the tax bill."""
+
+    property_id: str
+    unit_count: int | None
+    tax_annual: float | None  # the most recent year's property tax
+    tax_year: int | None
+    owner_occupied: bool | None
+    property_type_raw: str | None
+    bedrooms: float | None
+    bathrooms: float | None
+    building_sqft: float | None
+    year_built: int | None
+
+
+def parse_property(body: bytes) -> PropertyRecord:
+    try:
+        data = json.loads(body)
+    except ValueError as error:
+        raise SourceUnavailable(SOURCE, "the property record was not JSON") from error
+    if isinstance(data, list):  # the address search returns a list; the id lookup, one object
+        data = data[0] if data else None
+    if not isinstance(data, dict) or not _text(data.get("id")):
+        raise SourceUnavailable(SOURCE, "the response was not a property record")
+    features = data.get("features") if isinstance(data.get("features"), dict) else {}
+    taxes = data.get("propertyTaxes") if isinstance(data.get("propertyTaxes"), dict) else {}
+    bills = sorted(
+        (int(year), _number(entry.get("total")))
+        for year, entry in taxes.items()
+        if str(year).isdigit() and isinstance(entry, dict) and _number(entry.get("total"))
+    )
+    units = _number(features.get("unitCount"))
+    year_built = _number(data.get("yearBuilt"))
+    owner = data.get("ownerOccupied")
+    return PropertyRecord(
+        property_id=str(data["id"]),
+        unit_count=int(units) if units and units >= 1 else None,
+        tax_annual=bills[-1][1] if bills else None,
+        tax_year=bills[-1][0] if bills else None,
+        owner_occupied=owner if isinstance(owner, bool) else None,
+        property_type_raw=_text(data.get("propertyType")),
+        bedrooms=_number(data.get("bedrooms")),
+        bathrooms=_number(data.get("bathrooms")),
+        building_sqft=_number(data.get("squareFootage")),
+        year_built=None if year_built is None else int(year_built),
+    )
+
+
 class RentCastSource:
     """The RentCast listing source."""
 
@@ -155,7 +207,10 @@ class RentCastSource:
         max_price: float | None,
         inventory: Callable[[str], int | None] = lambda scope: None,
         today: Callable[[], date] = lambda: datetime.now().date(),
+        record_cache_days: float = 180,
     ) -> None:
+        self._record_cache = timedelta(days=record_cache_days)
+        self.requests_billed = 0  # billed requests made through this object
         self._fetcher = fetcher
         self._api_key = api_key
         self._guard = guard
@@ -182,6 +237,11 @@ class RentCastSource:
         if since is not None:
             query["daysOld"] = f"*:{max(1, (self._today() - since).days)}"
         return query
+
+    def _billed(self, endpoint: str) -> None:
+        """RentCast bills every HTTP 200, so each one is counted the moment it arrives."""
+        self._guard.record(endpoint)
+        self.requests_billed += 1
 
     def pages(
         self,
@@ -215,12 +275,11 @@ class RentCastSource:
                 max_age=timedelta(hours=self._sweep.page_cache_hours),
                 validate=parse_page,
                 before_send=self._guard.check,
+                on_success=lambda: self._billed("listings/sale"),
                 keep_headers=(TOTAL_HEADER,),
             )
             if fetched.stale:
                 raise SourceUnavailable(SOURCE, "RentCast could not be reached for a fresh page")
-            if not fetched.from_cache:
-                self._guard.record("listings/sale")
             items = parse_page(fetched.body)
             total = fetched.headers.get(TOTAL_HEADER, "")
             yield RawPage(
@@ -256,3 +315,22 @@ class RentCastSource:
 
     def to_listing(self, raw: dict[str, Any]) -> Listing:
         return to_listing(raw)
+
+    def property_record(self, listing_id: str) -> PropertyRecord:
+        """The property record behind a listing, which shares the listing's id.
+
+        One billed request unless a copy is still cached. Raises BudgetExceeded past the cap,
+        and SourceUnavailable when there is no key or RentCast has no record for the id.
+        """
+        if not self._api_key:
+            raise SourceUnavailable(SOURCE, "RENTCAST_API_KEY is not set", missing_key=True)
+        fetched = self._fetcher.get(
+            SOURCE,
+            f"{PROPERTIES_URL}/{quote(listing_id, safe='')}",
+            headers={"X-Api-Key": self._api_key, "Accept": "application/json"},
+            max_age=self._record_cache,
+            validate=parse_property,
+            before_send=self._guard.check,
+            on_success=lambda: self._billed("properties"),
+        )
+        return parse_property(fetched.body)

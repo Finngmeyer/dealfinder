@@ -115,7 +115,10 @@ class ListingRow(Base):
     price: Mapped[float | None]
 
     property_type_raw: Mapped[str | None] = mapped_column(String(80))
-    unit_count_stated: Mapped[int | None]
+    source_kind: Mapped[str] = mapped_column(
+        String(24), default="other"
+    )  # what the source says it is
+    unit_count_stated: Mapped[int | None]  # a unit count the source gives as data
     description: Mapped[str | None] = mapped_column(Text)
     hoa_fee_month: Mapped[float | None]
     tax_annual: Mapped[float | None]
@@ -163,14 +166,15 @@ class ClassificationRow(Base):
     __tablename__ = "classifications"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    property_id: Mapped[int] = mapped_column(ForeignKey("properties.id"), index=True)
+    property_id: Mapped[int] = mapped_column(ForeignKey("properties.id"), unique=True)
     property_kind: Mapped[str] = mapped_column(String(24))
     unit_count: Mapped[int | None]
     confidence: Mapped[str] = mapped_column(String(8))
     signals: Mapped[list[Any]] = mapped_column(default=list)
     flags: Mapped[list[Any]] = mapped_column(default=list)
-    method: Mapped[str] = mapped_column(String(24))
+    method: Mapped[str] = mapped_column(String(24))  # "rules", or "rules+llm" once Claude was asked
     version: Mapped[str] = mapped_column(String(16))
+    input_hash: Mapped[str] = mapped_column(String(32))  # what was classified; unchanged = skip
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
@@ -186,7 +190,9 @@ class UnitRow(Base):
     beds: Mapped[float | None]
     baths: Mapped[float | None]
     sqft: Mapped[float | None]
-    in_place_rent: Mapped[float | None]
+    in_place_rent: Mapped[float | None]  # stated in the listing: an actual figure
+    in_place_rent_quote: Mapped[str | None] = mapped_column(Text)  # the listing's words for it
+    vacant: Mapped[bool] = mapped_column(Boolean, default=False)
     market_rent: Mapped[float | None]
     market_rent_source: Mapped[str | None] = mapped_column(String(160))
     rent_low: Mapped[float | None]

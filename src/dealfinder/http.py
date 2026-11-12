@@ -33,11 +33,14 @@ class SourceUnavailable(Exception):
     """A data source cannot be used right now. ``reason`` is written for the person reading
     the output, for example "HUD_API_TOKEN is not set"."""
 
-    def __init__(self, source: str, reason: str, *, missing_key: bool = False) -> None:
+    def __init__(
+        self, source: str, reason: str, *, missing_key: bool = False, status: int | None = None
+    ) -> None:
         super().__init__(f"{source}: {reason}")
         self.source = source
         self.reason = reason
         self.missing_key = missing_key  # the source is simply not set up, as opposed to failing
+        self.status = status  # the HTTP status, when the source answered with an error
 
 
 class _Retryable(Exception):
@@ -169,11 +172,13 @@ class Fetcher:
                 self._sleep(min(float(retry_after), _MAX_RETRY_AFTER_SECONDS))
             raise _Retryable(f"HTTP {status}")
         if status in (401, 403):
-            raise SourceUnavailable(source, f"HTTP {status}: the key or token was not accepted")
+            raise SourceUnavailable(
+                source, f"HTTP {status}: the key or token was not accepted", status=status
+            )
         if 300 <= status < 400:
             target = urlsplit(response.headers.get("Location", "")).path or "another page"
             raise SourceUnavailable(source, f"the request was redirected to {target}")
-        raise SourceUnavailable(source, f"HTTP {status}")
+        raise SourceUnavailable(source, f"HTTP {status}", status=status)
 
     def _download(
         self, source: str, url: str, params: Mapping[str, str], headers: Mapping[str, str] | None
@@ -206,6 +211,7 @@ class Fetcher:
         validate: Callable[[bytes], object] | None = None,
         refresh: bool = False,
         before_send: Callable[[], object] | None = None,
+        on_success: Callable[[], object] | None = None,
         keep_headers: Sequence[str] = (),
     ) -> Fetched:
         """GET with the cache in front.
@@ -217,6 +223,9 @@ class Fetcher:
 
         ``before_send`` runs only when a real request is about to go out, never for a cache
         hit. A budget guard uses it to refuse a metered request; whatever it raises propagates.
+        ``on_success`` runs once when the server answers HTTP 200, before the body is checked:
+        a metered source counts the request there, so a billed response is counted even when
+        its body turns out to be unusable.
         ``keep_headers`` names response headers to keep with the cached copy.
         """
         key = self._key(url, params)
@@ -236,6 +245,8 @@ class Fetcher:
                 source, url, {**(params or {}), **(secret_params or {})}, headers
             )
             body = response.content
+            if on_success is not None:
+                on_success()
             if validate is not None:
                 validate(body)
         except SourceUnavailable:

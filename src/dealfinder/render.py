@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from dealfinder.analysis import AnalysisResult, AnalyzeRequest, InputLine, base_rate
+from dealfinder.classify.classifier import Classification
 from dealfinder.market.context import MarketContext
 from dealfinder.pipeline.sweep import SweepPlan
 from dealfinder.settings import Config
@@ -483,10 +484,11 @@ def render_listings(rows: Sequence[ListingRow], console: Console) -> None:
         address = ", ".join(
             part for part in (place.address_line1, place.city, place.state, place.zip_code) if part
         )
+        guess = "?" if place.unit_confidence in (None, "low") else ""  # not confirmed
         table.add_row(
             money(row.price),
             place.property_kind.replace("_", " "),
-            "?" if place.unit_count is None else str(place.unit_count),
+            "?" if place.unit_count is None else f"{place.unit_count}{guess}",
             "" if place.bedrooms is None else f"{place.bedrooms:g}",
             "" if place.bathrooms is None else f"{place.bathrooms:g}",
             address,
@@ -494,6 +496,36 @@ def render_listings(rows: Sequence[ListingRow], console: Console) -> None:
             "" if row.days_on_market is None else str(row.days_on_market),
         )
     console.print(table)
+
+
+def render_classification(result: Classification, console: Console) -> None:
+    count = "unknown" if result.unit_count is None else str(result.unit_count)
+    console.print(
+        f"[bold]{result.property_kind.replace('_', ' ')}[/bold], units: {count}, "
+        f"confidence: {result.confidence}"
+        + (" [bold](a fourplex)[/bold]" if result.is_fourplex else "")
+    )
+    if result.signals:
+        table = _table("Evidence", "Says", "Strength", "From", numeric_from=99)
+        for signal in result.signals:
+            says = "" if signal.unit_count is None else f"{signal.unit_count} units"
+            table.add_row(signal.name.replace("_", " "), says, signal.strength, signal.evidence)
+        console.print(table)
+    if result.flags:
+        console.print("Tags: " + ", ".join(result.flags), markup=False)
+    if result.units:
+        table = _table(f"Units (mix confidence {result.mix_confidence})", "Beds", "Baths", "Rent")
+        for position, unit in enumerate(result.units, start=1):
+            rent = "vacant" if unit.vacant else money(unit.in_place_rent)
+            if unit.in_place_rent is not None:
+                rent += " actual"
+            table.add_row(
+                f"Unit {position}",
+                "?" if unit.beds is None else f"{unit.beds:g}",
+                "?" if unit.baths is None else f"{unit.baths:g}",
+                rent,
+            )
+        console.print(table)
 
 
 def render_analysis(result: AnalysisResult, console: Console) -> None:

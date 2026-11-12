@@ -1,0 +1,65 @@
+# Phrases that tag a listing. Add or remove phrases freely.
+# Matching ignores case, treats a hyphen and a space alike, and only matches whole words.
+#
+# Tags listed under classify.rehab_by_flag in settings.yaml add a rehab budget.
+# motivated, estate_sale and bring_all_offers count toward seller motivation in the score.
+as_is:
+  - as-is
+  - sold as is
+  - investor special
+investor_special:
+  - investor special
+tlc:
+  - tlc
+fixer:
+  - fixer
+  - fixer-upper
+  - handyman special
+needs_work:
+  - needs work
+  - needs repairs
+  - needs renovation
+  - needs updating
+cash_only:
+  - cash only
+  - cash buyers only
+  - cash offers only
+tenant_occupied:
+  - tenant-occupied
+  - tenants in place
+  - fully rented
+  - fully occupied
+  - fully leased
+below_market_rents:
+  - below-market rents
+  - rents are below market
+  - rents below market
+  - under-market rents
+value_add:
+  - value-add
+motivated:
+  - motivated
+estate_sale:
+  - estate sale
+  - probate
+bring_all_offers:
+  - bring all offers
+  - bring offers
+  - all offers considered
+adu:
+  - adu
+  - accessory dwelling
+  - in-law suite
+  - mother-in-law
+  - carriage house
+  - granny flat
+  - guest house
+commercial:              # units here may be shops or offices, so the unit count is not trusted
+  - retail
+  - storefront
+  - office space
+  - warehouse
+  - industrial
+  - mixed-use
+  - self storage
+  - restaurant

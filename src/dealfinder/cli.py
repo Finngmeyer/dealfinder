@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, get_args
 
 import typer
 import yaml
@@ -13,19 +13,29 @@ from sqlalchemy import Engine, select
 
 from dealfinder.adapters.rentcast import RentCastSource
 from dealfinder.analysis import AnalysisError, AnalyzeRequest, analyze
+from dealfinder.classify.classifier import ClassifierInput, classify, kind_matches
+from dealfinder.classify.evaluate import append_label_rows, evaluate, load_labeled
+from dealfinder.classify.llm import ClaudeExtractor, Extractor
 from dealfinder.geo import normalize_zip
 from dealfinder.http import Fetcher
 from dealfinder.market.context import MarketContext, load_market
+from dealfinder.pipeline.classify import (
+    classify_all,
+    label_rows,
+    resolve_units,
+    unresolved_listings,
+)
 from dealfinder.pipeline.importer import CsvImportError, import_csv
 from dealfinder.pipeline.sweep import Mode, SweepError, plan_sweep, run_sweep, sweep_states
 from dealfinder.render import (
     render_analysis,
+    render_classification,
     render_listings,
     render_market,
     render_plan,
     render_usage,
 )
-from dealfinder.settings import Config, Environment, SettingsError, load_config
+from dealfinder.settings import Config, Environment, PropertyType, SettingsError, load_config
 from dealfinder.store import repo
 from dealfinder.store.db import open_database, session_scope
 from dealfinder.store.tables import ListingRow, PropertyRow, RunRow
@@ -293,8 +303,47 @@ def _rentcast(
         sweep=config.settings.sweep,
         max_price=config.settings.buy_box.max_price,
         inventory=last_count,
+        record_cache_days=config.settings.classify.property_record_cache_days,
     )
     return source, guard
+
+
+def _property_types(text: str) -> list[str]:
+    """Property types from a comma-separated option, checked against the ones that exist."""
+    known = get_args(PropertyType)
+    chosen = [part.strip().lower() for part in text.split(",") if part.strip()]
+    unknown = [name for name in chosen if name not in known]
+    if unknown or not chosen:
+        raise _fail(f"Unknown property type {', '.join(unknown)}. Choose from: {', '.join(known)}.")
+    return chosen
+
+
+def _extractor(
+    config: Config, environment: Environment, console: Console, *, wanted: bool | None = None
+) -> Extractor | None:
+    """The step that has Claude read descriptions, or None with the reason printed when off.
+
+    ``wanted`` None follows ``classify.llm.enabled`` in settings.
+    """
+    llm = config.settings.classify.llm
+    if not (llm.enabled if wanted is None else wanted):
+        return None
+    if not environment.anthropic_api_key:
+        console.print(
+            "Claude is not reading descriptions: ANTHROPIC_API_KEY is not set.", style="yellow"
+        )
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        console.print(
+            "Claude is not reading descriptions: the Anthropic SDK is not installed "
+            "(uv sync --extra llm).",
+            style="yellow",
+        )
+        return None
+    client = anthropic.Anthropic(api_key=environment.anthropic_api_key.get_secret_value())
+    return ClaudeExtractor(client, model=llm.model, effort=llm.effort, max_tokens=llm.max_tokens)
 
 
 def _sweep(mode: Mode, states: str | None, dry_run: bool, fresh: bool) -> None:
@@ -326,6 +375,7 @@ def _sweep(mode: Mode, states: str | None, dry_run: bool, fresh: bool) -> None:
         fetcher.close()
     style = {"completed": None, "stopped_budget": "yellow", "failed": "red"}[report.status]
     console.print(report.text(), style=style, markup=False)
+    console.print(classify_all(engine, config).text(), markup=False)
     if report.status == "failed":
         raise typer.Exit(code=1)
 
@@ -388,10 +438,150 @@ def import_csv_command(
         raise _fail(str(error)) from error
     console = Console()
     console.print(report.text(), markup=False)
+    if not dry_run:
+        console.print(classify_all(engine, config).text(), markup=False)
     if report.mapping_created:
         console.print("\nColumns were matched like this. Edit the mapping file if any are wrong:")
         for field, column in report.mapping.columns.items():
             console.print(f"  {field}: {column}", markup=False)
+
+
+@app.command("classify")
+def classify_command(
+    description: Annotated[str, typer.Argument(help="Listing description to read.")],
+    units: Annotated[int | None, typer.Option(help="Unit count the source states, if any.")] = None,
+    beds: Annotated[float | None, typer.Option(help="Total bedrooms in the building.")] = None,
+    baths: Annotated[float | None, typer.Option(help="Total bathrooms in the building.")] = None,
+    kind: Annotated[
+        str, typer.Option(help="What the source calls it, e.g. multifamily_2_4, sfr, condo.")
+    ] = "multifamily_2_4",
+    json_output: Annotated[bool, typer.Option("--json", help="Print the result as JSON.")] = False,
+) -> None:
+    """Show how one description is read: unit count, confidence, evidence, tags and rents."""
+    try:
+        config = load_config()
+        entry = ClassifierInput(
+            source_kind=kind,  # type: ignore[arg-type]
+            stated_units=units,
+            description=description,
+            bedrooms=beds,
+            bathrooms=baths,
+        )
+    except SettingsError as error:
+        raise _fail(str(error)) from error
+    except ValidationError as error:
+        raise _fail(f"'{kind}' is not a property kind.") from error
+    result = classify(entry, config.keywords)
+    if json_output:
+        typer.echo(result.model_dump_json(indent=2))
+    else:
+        render_classification(result, Console())
+
+
+@app.command("classify-eval")
+def classify_eval_command(
+    path: Annotated[Path, typer.Argument(help="CSV with 'description' and 'units' columns.")],
+) -> None:
+    """Score the classifier against descriptions you have labeled by hand."""
+    try:
+        config = load_config()
+        rows = load_labeled(path)
+    except (SettingsError, ValueError, OSError) as error:
+        raise _fail(str(error)) from error
+    Console().print(evaluate(rows, config.keywords).text(), markup=False)
+
+
+@app.command("label-sheet")
+def label_sheet_command(
+    path: Annotated[
+        Path | None,
+        typer.Option(help="Where to write it. Default: data/labeled/descriptions.csv."),
+    ] = None,
+) -> None:
+    """Write stored descriptions to a sheet for checking the classifier against real listings.
+
+    Rows whose source stated a unit count arrive already labeled. Fill in the 'units' column
+    for the rest (a number, land, or unknown), then run classify-eval on the file.
+    """
+    _, environment, engine = _load()
+    target = path or environment.dealfinder_data_dir / "labeled" / "descriptions.csv"
+    rows = label_rows(engine)
+    if not rows:
+        raise _fail("No stored listing has a description yet. Import an MLS export first.")
+    added, already = append_label_rows(target, rows)
+    blank = sum(1 for row in rows if not row["units"])
+    console = Console()
+    console.print(
+        f"Added {added} descriptions to {target} ({already} were already there).", markup=False
+    )
+    console.print(
+        f"{len(rows) - blank} carry the unit count the source stated; {blank} need the 'units' "
+        "column filled in by hand (a number, land, or unknown).",
+        markup=False,
+    )
+    console.print(f"Then: dealfinder classify-eval {target}", markup=False)
+
+
+@app.command("classify-all")
+def classify_all_command(
+    llm: Annotated[
+        bool | None,
+        typer.Option(
+            "--llm/--no-llm",
+            help="Have Claude read descriptions the rules are unsure of. Default: the setting.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Read every property again, changed or not.")
+    ] = False,
+) -> None:
+    """Classify stored properties from their listings: kind, unit count, units and rents.
+
+    Imports and sweeps do this on their own with the rules; run it by hand after editing
+    config/keywords.yaml or to have Claude read the uncertain ones.
+    """
+    config, environment, engine = _load()
+    console = Console()
+    extractor = _extractor(config, environment, console, wanted=llm)
+    report = classify_all(engine, config, extractor=extractor, force=force)
+    console.print(report.text(), markup=False)
+
+
+@app.command("resolve-units")
+def resolve_units_command(
+    limit: Annotated[
+        int | None,
+        typer.Option(help="Most listings to look up. Default: as many as the budget allows."),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show how many lookups are pending; fetch nothing.")
+    ] = False,
+) -> None:
+    """Look up RentCast property records for listings whose unit count is unconfirmed.
+
+    Each lookup is one billed request and can bring back the unit count and the last tax bill.
+    """
+    config, environment, engine = _load()
+    console = Console()
+    fetcher = Fetcher(environment.cache_dir, offline=environment.dealfinder_offline)
+    try:
+        source, guard = _rentcast(config, environment, engine, fetcher)
+        if dry_run:
+            with session_scope(engine) as session:
+                pending = len(unresolved_listings(session, config))
+            wanted = pending if limit is None else min(pending, limit)
+            left = "no cap" if guard.cap is None else f"{guard.remaining()} left of {guard.cap}"
+            console.print(
+                f"{pending} listings have no confirmed unit count. Looking up {wanted} would "
+                f"take up to {wanted} billed requests. Budget: {left}."
+            )
+            return
+        if not environment.rentcast_api_key:
+            raise _fail("RentCast is off: RENTCAST_API_KEY is not set. Add it to .env.")
+        report = resolve_units(engine, config, source, limit=limit)
+    finally:
+        fetcher.close()
+    console.print(report.text(), style="yellow" if report.stopped else None, markup=False)
 
 
 @app.command("usage")
@@ -415,16 +605,68 @@ def listings_command(
         str, typer.Option(help="active, pending, off_market, sold or all.")
     ] = "active",
     limit: Annotated[int, typer.Option(help="How many to show.")] = 25,
+    types: Annotated[
+        str | None,
+        typer.Option(help="Property types, comma-separated, or 'all'. Default: the buy box's."),
+    ] = None,
+    unverified: Annotated[
+        bool,
+        typer.Option(
+            "--unverified",
+            help="Show listings that might be a wanted type but lack a confirmed unit count.",
+        ),
+    ] = False,
 ) -> None:
-    """List stored listings, cheapest first. Ranking by cash flow arrives with the dashboard."""
-    _, _, engine = _load()
+    """List stored listings of the wanted property types, cheapest first.
+
+    Ranking by cash flow arrives with the dashboard.
+    """
+    config, _, engine = _load()
+    box = config.settings.buy_box
+    wanted: list[str] | None = list(box.property_types)
+    if types is not None:
+        wanted = None if types.strip().lower() == "all" else _property_types(types)
+    if unverified and wanted is None:
+        raise _fail("--unverified needs property types to check against, not --types all.")
     query = select(ListingRow).join(PropertyRow).order_by(ListingRow.price.asc().nulls_last())
     if status != "all":
         query = query.where(ListingRow.status == status)
     if state:
         query = query.where(PropertyRow.state == state.upper())
+    console = Console()
     with session_scope(engine) as session:
-        render_listings(session.scalars(query.limit(limit)).all(), Console())
+        rows = session.scalars(query).all()
+        if wanted is None:
+            render_listings(rows[:limit], console)
+            return
+        groups: dict[str, list[ListingRow]] = {"yes": [], "unverified": [], "no": []}
+        for row in rows:
+            place = row.property
+            match = kind_matches(
+                place.property_kind, place.unit_confidence, wanted, box.min_unit_confidence
+            )
+            groups[match].append(row)
+        shown = groups["unverified" if unverified else "yes"]
+        if shown:
+            render_listings(shown[:limit], console)
+        console.print(
+            f"{', '.join(wanted)}: {len(groups['yes'])} confirmed, "
+            f"{len(groups['unverified'])} with an unconfirmed unit count, "
+            f"{len(groups['no'])} of other kinds.",
+            markup=False,
+        )
+        if not rows:
+            console.print("Nothing stored yet. Run a sweep or import a CSV.", style="dim")
+        elif unverified and shown:
+            console.print(
+                "Confirm unit counts with: dealfinder resolve-units (one RentCast request each).",
+                style="dim",
+            )
+        elif not unverified and groups["unverified"]:
+            console.print(
+                "See the unconfirmed ones with --unverified, everything with --types all.",
+                style="dim",
+            )
 
 
 if __name__ == "__main__":

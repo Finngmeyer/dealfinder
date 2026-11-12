@@ -267,7 +267,7 @@ class TestPages:
         source, guard = make_source(engine, small_pages, fetcher)
         with pytest.raises(SourceUnavailable, match="not a list of listings"):
             list(source.pages(OH, FOURPLEX))
-        assert guard.used() == 0
+        assert guard.used() == 1  # RentCast bills every HTTP 200, usable or not
 
     def test_search_yields_raw_records(self, engine, small_pages, fetcher, http_mock):
         serve(http_mock, {"OH": records(3)})

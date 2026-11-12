@@ -120,13 +120,16 @@ def _fill_property(row: PropertyRow, listing: Listing) -> None:
         row.address_key = _address_key(listing)
     if row.geo_cell is None and row.latitude is not None and row.longitude is not None:
         row.geo_cell = dedupe.geo_cell(row.latitude, row.longitude)
+    # Kind and unit count belong to the classifier once it has run (it sets a confidence).
+    # Until then these are stand-ins taken from the first listing that knows.
+    if row.unit_confidence is not None:
+        return
     if _KIND_RANK.get(listing.property_kind, _DEFAULT_KIND_RANK) > _KIND_RANK.get(
         row.property_kind, _DEFAULT_KIND_RANK
     ):
         row.property_kind = listing.property_kind
     if listing.unit_count is not None and row.unit_count is None:
         row.unit_count = listing.unit_count
-        row.unit_confidence = "high"
 
 
 _LISTING_FIELDS = (
@@ -182,6 +185,7 @@ def upsert_listing(
             source=listing.source,
             source_listing_id=listing.source_listing_id,
             unit_count_stated=listing.unit_count,
+            source_kind=listing.property_kind,
             raw_json=listing.raw,
             first_seen_at=moment,
             last_seen_at=moment,
@@ -227,7 +231,11 @@ def upsert_listing(
             setattr(row, name, value)
     if listing.unit_count is not None:
         row.unit_count_stated = listing.unit_count
-    row.raw_json = listing.raw
+    row.source_kind = listing.property_kind
+    # Keep what later steps attached to the record (keys starting with "_"), such as a
+    # property-record lookup, when the source sends the listing again.
+    kept = {key: value for key, value in (row.raw_json or {}).items() if key.startswith("_")}
+    row.raw_json = {**listing.raw, **kept}
     row.last_seen_at = moment
     row.last_seen_run_id = run_id
     row.missed_sweeps = 0

@@ -18,8 +18,14 @@ dependencies = [
 [project.scripts]
 dealfinder = "dealfinder.cli:app"
 
+[project.optional-dependencies]
+llm = [
+    "anthropic>=1.0",
+]
+
 [dependency-groups]
 dev = [
+    "anthropic>=1.0",
     "pytest>=8.0",
     "respx>=0.21",
     "ruff>=0.6",

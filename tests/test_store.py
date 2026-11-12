@@ -224,9 +224,10 @@ class TestDedupeAcrossSources:
         with session_scope(engine) as session:
             place = session.scalars(select(PropertyRow)).one()
             assert len(place.listings) == 2
-            # The more specific source fills in what the first one could not say.
+            # The more specific source fills in what the first one could not say. These are
+            # stand-ins until the classifier runs, which is what sets a confidence.
             assert (place.property_kind, place.unit_count, place.unit_confidence) == (
-                "fourplex", 4, "high",
+                "fourplex", 4, None,
             )  # fmt: skip
 
     def test_a_vaguer_source_does_not_overwrite_a_specific_kind(self, engine):
