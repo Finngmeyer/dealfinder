@@ -1,0 +1,15 @@
+# secrets and personal settings
+.env
+config/settings.local.yaml
+
+# runtime data: database, HTTP cache, imports, labeled listing text, exports
+/data/
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.pytest_cache/
+.ruff_cache/

@@ -1,0 +1,150 @@
+# Dealfinder settings.
+#
+# Everything the app assumes lives in this file, so any of it can be changed without touching
+# code. To change something just for yourself, create config/settings.local.yaml containing only
+# the keys you want different; it is merged over this file and is git-ignored.
+#
+# Shares and rates are fractions: 0.06 means 6%. Money is dollars.
+
+buy_box:
+  property_types: [fourplex]     # any of: sfr, condo, townhouse, duplex, triplex, fourplex, multifamily_5plus
+  states: all                    # all = the 48 contiguous states + DC, or a list such as [OH, IN, MI]
+  max_price: 750000              # null = no cap
+  min_unit_confidence: medium    # high | medium | low
+  ranking_scenario: conv_investor
+  targets:                       # null switches a target off
+    min_cash_flow_per_door_month: 100
+    min_coc: 0.06
+    min_dscr: 1.20
+
+underwriting:
+  vacancy:
+    floor: 0.06                  # vacancy = max(floor, county rental vacancy + county_add)
+    county_add: 0.01
+  management:
+    mode: self                   # self | manager
+    self_pct: 0.0                # share of EGI when you manage the building yourself
+    manager_pct: 0.09            # share of EGI with a property manager; always used for the
+                                 # "moved out" view of a house hack
+  repairs_and_reserves:          # each a share of GSR, picked by year built
+    - {built_before: 1950, repairs_pct: 0.10, reserves_pct: 0.10}
+    - {built_before: 1980, repairs_pct: 0.08, reserves_pct: 0.08}
+    - {built_before: 2000, repairs_pct: 0.07, reserves_pct: 0.07}
+    - {built_before: null, repairs_pct: 0.05, reserves_pct: 0.05}
+  utilities:
+    paid_by: unknown             # owner | tenant | unknown (unknown charges the owner and flags it)
+    owner_cost_per_unit_month: 75
+  insurance:
+    per_unit_year: 900           # used when a state is missing from insurance_by_state.csv
+    high_risk_multiplier: 1.5    # applied in counties with a high FEMA risk rating
+  flood_insurance_per_unit_year: 750   # placeholder, charged only inside a flood zone
+  misc_per_unit_year: 300
+  closing_cost_pct: 0.03
+  rehab_per_unit:                # picked by condition flags, or set a dollar amount per deal
+    none: 0
+    light: 5000
+    heavy: 20000
+
+when_unknown:                    # pessimistic stand-ins; every use is flagged in the output
+  tax_rate: 0.025
+  vacancy_rate: 0.10
+  base_rate: 0.075
+  year_built: 1900               # falls in the oldest band above
+  high_hazard_county: true       # true applies the insurance multiplier when the county rating is unknown
+  in_flood_zone: false           # false flags "not checked" without charging flood insurance
+
+hold:
+  years: 5
+  rent_growth: 0.03              # per year, from year 2
+  expense_growth: 0.03           # per year on dollar-based expenses, from year 2
+  appreciation: 0.03
+  selling_cost_pct: 0.06
+
+sensitivity:                     # each case moves one thing; add, remove or edit freely
+  - {name: "Rate +1 pt", rate_delta: 0.01}
+  - {name: "Rate -1 pt", rate_delta: -0.01}
+  - {name: "Rents -10%", rent_factor: 0.90}
+  - {name: "Vacancy +5 pts", vacancy_delta: 0.05}
+  - {name: "Insurance +50%", insurance_factor: 1.5}
+  - {name: "Taxes +25%", tax_factor: 1.25}
+
+financing:
+  loan_limit_year: 2026          # picks config/loan_limits/<year>.yaml
+  base_rate_manual: null         # your own base rate, used instead of the 30-year average
+  presets:
+    # Each loan's rate is its rate_quote when set, otherwise base rate + rate_spread.
+    # Spreads and mortgage-insurance rates below are placeholders. Set enabled: false to hide a loan.
+    fha_house_hack:
+      enabled: true
+      label: FHA 3.5% down, house hack
+      program: fha
+      owner_occupied: true
+      min_units: 2
+      max_units: 4
+      down_payment_pct: 0.035
+      term_years: 30
+      rate_spread: 0.0
+      rate_quote: null
+      upfront_mi_pct: 0.0175     # financed into the loan
+      annual_mi:                 # loans over 15 years, charged monthly on the base loan
+        - {max_base_loan: 726200, ltv_above: 0.95, rate_above: 0.0055, rate_at_or_below: 0.0050}
+        - {max_base_loan: null, ltv_above: 0.95, rate_above: 0.0075, rate_at_or_below: 0.0070}
+      loan_limit: fha            # fha | conforming_baseline | conforming_county | none
+      self_sufficiency: {factor: 0.75, units: [3, 4]}
+    conv_owner_5:
+      enabled: true
+      label: Conventional 5% down, owner-occupied
+      program: conventional
+      owner_occupied: true
+      min_units: 2
+      max_units: 4
+      down_payment_pct: 0.05
+      term_years: 30
+      rate_spread: 0.0025
+      rate_quote: null
+      annual_mi:                 # private mortgage insurance while the loan is over 80% of price
+        - {max_base_loan: null, ltv_above: 0.80, rate_above: 0.0060, rate_at_or_below: 0.0}
+      loan_limit: conforming_baseline   # standard amounts only, no high-balance
+      reserves_months: 6
+    conv_investor:
+      enabled: true
+      label: Conventional 25% down, investor
+      program: conventional
+      min_units: 1
+      max_units: 4
+      down_payment_pct: 0.25
+      term_years: 30
+      rate_spread: 0.0075
+      rate_quote: null
+      loan_limit: conforming_county
+    dscr:
+      enabled: true
+      label: DSCR loan, 25% down
+      program: dscr
+      min_units: 1
+      max_units: 4
+      down_payment_pct: 0.25
+      term_years: 30
+      rate_spread: 0.0125
+      rate_quote: null
+      lender_dscr: {min: 1.00, best: 1.25}
+    commercial:
+      enabled: true
+      label: Commercial loan, 5+ units
+      program: commercial
+      min_units: 5
+      max_units: null
+      down_payment_pct: 0.25
+      term_years: 25             # amortization
+      rate_spread: 0.015
+      rate_quote: null
+      lender_dscr: {min: 1.25, best: 1.25}
+    cash:
+      enabled: true
+      label: All cash
+      program: cash
+      min_units: 1
+      max_units: null
+      down_payment_pct: 1.0
+      term_years: 30
+      rate_spread: 0.0

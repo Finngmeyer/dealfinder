@@ -1,0 +1,12 @@
+# National loan limits by number of units, for the 48 contiguous states and DC.
+# County limits are in 2026_counties.csv, built by scripts/build_loan_limits.py, which also
+# checks these national figures against HUD's files. A county missing from that table gets the
+# lowest national figure, which is the cautious choice.
+year: 2026
+sources:
+  conforming: FHFA conforming loan limit values for 2026, announced November 25, 2025
+  fha: HUD Mortgagee Letter 2025-23, December 11, 2025 (case numbers assigned on or after January 1, 2026)
+conforming_baseline: {1: 832750, 2: 1066250, 3: 1288800, 4: 1601750}
+conforming_ceiling: {1: 1249125, 2: 1599375, 3: 1933200, 4: 2402625}
+fha_floor: {1: 541287, 2: 693050, 3: 837700, 4: 1041125}
+fha_ceiling: {1: 1249125, 2: 1599375, 3: 1933200, 4: 2402625}
