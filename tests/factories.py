@@ -91,3 +91,64 @@ def rentcast_property(number: int, **changes: Any) -> dict[str, Any]:
     }
     record.update(changes)
     return record
+
+
+def market_context(zip_code: str = "43215", **changes: Any):
+    """Market data for a ZIP as the free sources would give it, with every source connected."""
+    from datetime import date
+
+    from dealfinder.geo import lookup_zip
+    from dealfinder.market.acs import CountyHousing
+    from dealfinder.market.context import MarketContext
+    from dealfinder.market.fred import MortgageRate
+    from dealfinder.market.hud import FairMarketRents
+    from dealfinder.market.nri import CountyRisk
+
+    place = lookup_zip(zip_code)
+    county = place.county_fips if place and place.county_fips else "39049"
+    fields: dict[str, Any] = {
+        "zip_code": zip_code,
+        "place": place,
+        "mortgage_rate": MortgageRate(rate=0.0625, as_of=date(2026, 11, 5), source="FRED"),
+        "fair_market_rents": FairMarketRents(
+            fiscal_year=2027,
+            area_name="Sample Metro",
+            zip_level=False,
+            rents={0: 900.0, 1: 1050.0, 2: 1300.0, 3: 1650.0, 4: 1900.0},
+        ),
+        "housing": CountyHousing(
+            year=2024,
+            county_fips=county,
+            name="Sample County, Ohio",
+            median_taxes=2400.0,
+            median_value=200_000.0,
+            aggregate_taxes=None,
+            aggregate_value=None,
+            rental_vacancy=0.05,
+        ),
+        "risk": CountyRisk(county_fips=county, score=40.0, rating="Relatively Low"),
+    }
+    fields.update(changes)
+    return MarketContext(**fields)
+
+
+def rent_estimate(rent: float = 1400.0, comps: int = 3) -> dict[str, Any]:
+    """A RentCast long-term rent estimate response."""
+    return {
+        "rent": rent,
+        "rentRangeLow": rent - 100,
+        "rentRangeHigh": rent + 100,
+        "comparables": [
+            {
+                "formattedAddress": f"{200 + n} Comparable Ct, Columbus, OH 43215",
+                "price": rent - 30 + 30 * n,
+                "bedrooms": 2,
+                "bathrooms": 1,
+                "squareFootage": 880 + 10 * n,
+                "distance": 0.3 + 0.1 * n,
+                "daysOld": 12 * (n + 1),
+                "correlation": 0.98 - 0.01 * n,
+            }
+            for n in range(comps)
+        ],
+    }

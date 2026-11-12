@@ -58,6 +58,9 @@ def upgrade() -> None:
         sa.Column("building_sqft", sa.Double(), nullable=True),
         sa.Column("lot_sqft", sa.Double(), nullable=True),
         sa.Column("year_built", sa.Integer(), nullable=True),
+        sa.Column("flood_zone", sa.String(length=24), nullable=True),
+        sa.Column("in_flood_zone", sa.Boolean(), nullable=True),
+        sa.Column("flood_checked_at", sa.DateTime(), nullable=True),
         sa.Column("starred", sa.Boolean(), nullable=False),
         sa.Column("hidden", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),
@@ -281,6 +284,37 @@ def upgrade() -> None:
         )
 
     op.create_table(
+        "screens",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("listing_id", sa.Integer(), nullable=False),
+        sa.Column("property_id", sa.Integer(), nullable=False),
+        sa.Column("stage", sa.Integer(), nullable=False),
+        sa.Column("passed_stage1", sa.Boolean(), nullable=True),
+        sa.Column("note", sa.Text(), nullable=True),
+        sa.Column("type_match", sa.String(length=12), nullable=False),
+        sa.Column("confidence", sa.String(length=8), nullable=True),
+        sa.Column("price", sa.Double(), nullable=True),
+        sa.Column("request", sa.JSON(), nullable=False),
+        sa.Column("inputs", sa.JSON(), nullable=False),
+        sa.Column("flags", sa.JSON(), nullable=False),
+        sa.Column("details", sa.JSON(), nullable=False),
+        sa.Column("enrichment", sa.JSON(), nullable=False),
+        sa.Column("computed_at", sa.DateTime(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["listing_id"],
+            ["listings.id"],
+        ),
+        sa.ForeignKeyConstraint(
+            ["property_id"],
+            ["properties.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("listing_id"),
+    )
+    with op.batch_alter_table("screens", schema=None) as batch_op:
+        batch_op.create_index(batch_op.f("ix_screens_property_id"), ["property_id"], unique=False)
+
+    op.create_table(
         "underwriting",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("property_id", sa.Integer(), nullable=False),
@@ -288,7 +322,6 @@ def upgrade() -> None:
         sa.Column("scenario", sa.String(length=40), nullable=False),
         sa.Column("stage", sa.Integer(), nullable=False),
         sa.Column("engine_version", sa.String(length=16), nullable=False),
-        sa.Column("inputs", sa.JSON(), nullable=False),
         sa.Column("results", sa.JSON(), nullable=False),
         sa.Column("cash_flow_door_month", sa.Double(), nullable=True),
         sa.Column("coc", sa.Double(), nullable=True),
@@ -297,7 +330,9 @@ def upgrade() -> None:
         sa.Column("mao", sa.Double(), nullable=True),
         sa.Column("score", sa.Double(), nullable=True),
         sa.Column("grade", sa.String(length=1), nullable=True),
+        sa.Column("score_parts", sa.JSON(), nullable=False),
         sa.Column("in_buy_box", sa.Boolean(), nullable=True),
+        sa.Column("buy_box_misses", sa.JSON(), nullable=False),
         sa.Column("computed_at", sa.DateTime(), nullable=False),
         sa.ForeignKeyConstraint(
             ["listing_id"],
@@ -332,6 +367,10 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f("ix_underwriting_listing_id"))
 
     op.drop_table("underwriting")
+    with op.batch_alter_table("screens", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_screens_property_id"))
+
+    op.drop_table("screens")
     with op.batch_alter_table("price_events", schema=None) as batch_op:
         batch_op.drop_index(batch_op.f("ix_price_events_listing_id"))
 

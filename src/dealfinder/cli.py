@@ -26,13 +26,17 @@ from dealfinder.pipeline.classify import (
     unresolved_listings,
 )
 from dealfinder.pipeline.importer import CsvImportError, import_csv
+from dealfinder.pipeline.report import deal_rows, problem_rows
 from dealfinder.pipeline.sweep import Mode, SweepError, plan_sweep, run_sweep, sweep_states
+from dealfinder.pipeline.underwrite import run_funnel
 from dealfinder.render import (
     render_analysis,
     render_classification,
     render_listings,
     render_market,
     render_plan,
+    render_problems,
+    render_report,
     render_usage,
 )
 from dealfinder.settings import Config, Environment, PropertyType, SettingsError, load_config
@@ -582,6 +586,89 @@ def resolve_units_command(
     finally:
         fetcher.close()
     console.print(report.text(), style="yellow" if report.stopped else None, markup=False)
+
+
+@app.command("underwrite")
+def underwrite_command(
+    stage1_only: Annotated[
+        bool,
+        typer.Option("--stage1-only", help="Free data only: no RentCast, flood or Claude calls."),
+    ] = False,
+) -> None:
+    """Underwrite every stored listing of the wanted types, enrich the best, and score them.
+
+    Stage 1 uses free data. Stage 2 spends RentCast requests on the survivors, best first,
+    inside the request budget.
+    """
+    config, environment, engine = _load()
+    console = Console()
+    fetcher = Fetcher(environment.cache_dir, offline=environment.dealfinder_offline)
+    try:
+        source, _ = _rentcast(config, environment, engine, fetcher)
+        rentcast = source if environment.rentcast_api_key else None
+        if not config.settings.sources["rentcast"].enabled:
+            rentcast = None
+        extractor = None if stage1_only else _extractor(config, environment, console)
+        report = run_funnel(
+            engine,
+            config,
+            environment,
+            fetcher,
+            rentcast=rentcast,
+            extractor=extractor,
+            stage2=not stage1_only,
+        )
+    except AnalysisError as error:
+        raise _fail(str(error)) from error
+    finally:
+        fetcher.close()
+    console.print(report.text(), markup=False)
+    console.print("See them with: dealfinder report --top 20", style="dim")
+
+
+@app.command("report")
+def report_command(
+    top: Annotated[int, typer.Option(help="How many deals to show.")] = 20,
+    scenario: Annotated[
+        str | None, typer.Option(help="Loan preset to rank by. Default: the ranking scenario.")
+    ] = None,
+    state: Annotated[str | None, typer.Option(help="Two-letter state.")] = None,
+    buy_box: Annotated[
+        bool, typer.Option("--buy-box", help="Only deals inside the buy box.")
+    ] = False,
+    unverified: Annotated[
+        bool, typer.Option("--unverified", help="Show deals whose unit count is unconfirmed.")
+    ] = False,
+    problems: Annotated[
+        bool, typer.Option("--problems", help="Show listings that could not be underwritten.")
+    ] = False,
+) -> None:
+    """Rank the underwritten deals by cash flow per door."""
+    config, _, engine = _load()
+    console = Console()
+    with session_scope(engine) as session:
+        if problems:
+            render_problems(problem_rows(session), console)
+            return
+        name = scenario or config.settings.buy_box.ranking_scenario
+        if name not in config.settings.financing.presets:
+            known = ", ".join(config.settings.financing.presets)
+            raise _fail(f"Unknown scenario {name}. Choose from: {known}.")
+        rows = deal_rows(session, config, name)
+        waiting = len(problem_rows(session))
+    if state:
+        rows = [row for row in rows if row.state == state.upper()]
+    wanted = "unverified" if unverified else "yes"
+    shown = [row for row in rows if row.type_match == wanted and (row.in_buy_box or not buy_box)]
+    render_report(shown[:top], name, console, total=len(shown))
+    others = sum(1 for row in rows if row.type_match != wanted)
+    if others or waiting:
+        console.print(
+            f"Also stored: {others} "
+            f"{'confirmed' if unverified else 'with an unconfirmed unit count (--unverified)'}, "
+            f"{waiting} that could not be underwritten (--problems).",
+            style="dim",
+        )
 
 
 @app.command("usage")

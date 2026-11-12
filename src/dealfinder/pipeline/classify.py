@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Engine, distinct, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from dealfinder.adapters.rentcast import RentCastSource
+from dealfinder.adapters.rentcast import PropertyRecord, RentCastSource
 from dealfinder.classify.classifier import (
     CLASSIFIER_VERSION,
     KIND_BY_COUNT,
@@ -396,28 +396,60 @@ def resolve_units(
                 record = None
             report.looked_up += 1
             report.requests += source.requests_billed - billed_before
-            note: dict[str, object] = {"on": date.today().isoformat(), "found": bool(record)}
-            place = row.property
-            if record is None:
-                report.no_record += 1
-            else:
-                if record.unit_count is not None:
-                    row.unit_count_stated = record.unit_count
-                    report.with_unit_count += 1
-                if record.tax_annual is not None:
-                    row.tax_annual = record.tax_annual
-                    report.with_tax_bill += 1
-                for name in ("bedrooms", "bathrooms", "building_sqft", "year_built"):
-                    if getattr(place, name) is None:  # fill gaps; never replace the listing's
-                        setattr(place, name, getattr(record, name))
-                note.update(record.model_dump(exclude={"property_id"}))
-            row.raw_json = {**(row.raw_json or {}), RECORD_KEY: note}
-            session.flush()
-            entry = classifier_input(place)
-            save_classification(
-                session,
-                place,
-                classify(entry, config.keywords),
-                input_hash(entry, config.keywords),
-            )
+            report.no_record += record is None
+            report.with_unit_count += bool(record and record.unit_count is not None)
+            report.with_tax_bill += bool(record and record.tax_annual is not None)
+            apply_record(session, row, record, config)
     return report
+
+
+def reclassify(session: Session, place: PropertyRow, config: Config) -> Classification:
+    """Run the rules on a property again and store the result."""
+    entry = classifier_input(place)
+    result = classify(entry, config.keywords)
+    save_classification(session, place, result, input_hash(entry, config.keywords))
+    return result
+
+
+def apply_record(
+    session: Session, row: ListingRow, record: PropertyRecord | None, config: Config
+) -> None:
+    """Store what a property-record lookup found (None: RentCast has no record) on the
+    listing, note that it was looked up so it is never asked for again, and reclassify."""
+    note: dict[str, object] = {"on": date.today().isoformat(), "found": record is not None}
+    place = row.property
+    if record is not None:
+        if record.unit_count is not None:
+            row.unit_count_stated = record.unit_count
+        if record.tax_annual is not None:
+            row.tax_annual = record.tax_annual
+        for name in ("bedrooms", "bathrooms", "building_sqft", "year_built"):
+            if getattr(place, name) is None:  # fill gaps; never replace the listing's own
+                setattr(place, name, getattr(record, name))
+        note.update(record.model_dump(exclude={"property_id"}))
+    row.raw_json = {**(row.raw_json or {}), RECORD_KEY: note}
+    session.flush()
+    reclassify(session, place, config)
+
+
+def read_with_claude(
+    session: Session, place: PropertyRow, config: Config, extractor: Extractor
+) -> bool:
+    """Have Claude read one property's description, if the rules are unsure and it has not
+    been read already. True when Claude was asked. Raises SourceUnavailable when it cannot be."""
+    stored = session.scalars(
+        select(ClassificationRow).where(ClassificationRow.property_id == place.id)
+    ).first()
+    entry = classifier_input(place)
+    digest = input_hash(entry, config.keywords)
+    if stored is not None and stored.input_hash == digest and stored.method == LLM_METHOD:
+        return False
+    result = classify(entry, config.keywords)
+    if not wants_llm(result, entry, config.settings.classify.llm):
+        return False
+    extraction = extractor(entry.description or "")
+    if extraction is not None:
+        result = apply_extraction(result, extraction, entry)
+    result.method = LLM_METHOD
+    save_classification(session, place, result, digest)
+    return True

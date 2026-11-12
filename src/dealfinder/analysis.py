@@ -61,14 +61,24 @@ class RateInfo(BaseModel):
     flagged: bool = False
 
 
+class Provenance(BaseModel):
+    """Where a figure in a request came from, when it was not typed in by the user."""
+
+    source: str
+    kind: Kind = "actual"
+    flagged: bool = False
+
+
 class AnalyzeRequest(BaseModel):
-    """What the user knows about a deal. Anything left as None is filled from market data or
+    """What is known about a deal. Anything left as None is filled from market data or
     settings."""
 
     model_config = ConfigDict(extra="forbid")
 
     price: float = Field(gt=0)
-    rents: list[float] = Field(min_length=1)  # current monthly rent, one per unit
+    # Current monthly rent, one entry per unit; None for a unit that is vacant or whose rent is
+    # not known, which then needs a market rent.
+    rents: list[float | None] = Field(min_length=1)
     zip_code: str
     market_rents: list[float] | None = None
     beds: list[float] | None = None  # bedrooms per unit, used to look up market rents
@@ -92,11 +102,14 @@ class AnalyzeRequest(BaseModel):
     scenarios: list[str] | None = None  # None runs every enabled preset
     owner_unit: int | None = Field(default=None, ge=1)  # 1-based, for owner-occupied loans
     comparison_rent: float | None = Field(default=None, ge=0)  # what renting instead costs
+    # For figures that come from a listing or a data source, keyed like the input lines
+    # ("price", "rents", "tax_bill", ...). Without an entry a figure counts as entered by hand.
+    provenance: dict[str, Provenance] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _consistent(self) -> AnalyzeRequest:
         units = len(self.rents)
-        if any(rent < 0 for rent in self.rents):
+        if any(rent is not None and rent < 0 for rent in self.rents):
             raise ValueError("rents cannot be negative")
         if self.market_rents is not None:
             if len(self.market_rents) != units:
@@ -134,9 +147,10 @@ class AnalysisResult(BaseModel):
 class _Assembly:
     """Collects the input lines and flags while a deal is put together."""
 
-    def __init__(self) -> None:
+    def __init__(self, provenance: dict[str, Provenance] | None = None) -> None:
         self.lines: list[InputLine] = []
         self.flags: list[Flag] = []
+        self._provenance = provenance or {}
 
     def line(
         self,
@@ -148,7 +162,13 @@ class _Assembly:
         source: str,
         *,
         flagged: bool = False,
+        given: bool = False,
     ) -> None:
+        """Record one input. ``given`` marks a figure that came with the request, whose kind
+        and source are then taken from the request's provenance when it has an entry."""
+        note = self._provenance.get(key) if given else None
+        if note is not None:
+            kind, source, flagged = note.kind, note.source, flagged or note.flagged
         self.lines.append(
             InputLine(
                 key=key,
@@ -235,23 +255,31 @@ def _units(
     paid_by: PaidBy,
     out: _Assembly,
 ) -> tuple[Unit, ...]:
-    out.line(
-        "rents",
-        "Current rents",
-        sum(request.rents),
-        "money_month",
-        "actual",
-        f"entered: {money_list(request.rents)}",
-    )
+    known = [rent for rent in request.rents if rent is not None]
+    if known:
+        note = request.provenance.get("rents")
+        origin = note.source if note else "entered"
+        out.line(
+            "rents",
+            "Current rents",
+            sum(known),
+            "money_month",
+            note.kind if note else "actual",
+            f"{origin}: {money_list(request.rents)}",
+            flagged=bool(note and note.flagged),
+        )
     market_rents = request.market_rents
     if market_rents is not None:
+        note = request.provenance.get("market_rents")
+        origin = note.source if note else "entered"
         out.line(
             "market_rents",
             "Market rents",
             sum(market_rents),
             "money_month",
             "estimated",
-            f"entered: {money_list(market_rents)}",
+            f"{origin}: {money_list(market_rents)}",
+            flagged=bool(note and note.flagged),
         )
     else:
         estimated = _fmr_rents(request, config, market, paid_by)
@@ -282,6 +310,16 @@ def _units(
             )
 
     beds = request.beds
+    missing = [
+        str(index + 1)
+        for index, rent in enumerate(request.rents)
+        if rent is None and market_rents is None
+    ]
+    if missing:
+        raise AnalysisError(
+            f"No rent is known for unit {', '.join(missing)} and there is no market rent "
+            "estimate to use in its place."
+        )
     units = tuple(
         Unit(
             in_place_rent=rent,
@@ -290,7 +328,24 @@ def _units(
         )
         for index, rent in enumerate(request.rents)
     )
-    above = [str(i + 1) for i, unit in enumerate(units) if unit.current_rent < request.rents[i]]
+    unknown = [str(index + 1) for index, rent in enumerate(request.rents) if rent is None]
+    if unknown:
+        every = len(unknown) == len(units)
+        out.flag(
+            "rents_estimated",
+            "warning",
+            (
+                "No current rents are known"
+                if every
+                else f"No rent is known for unit {', '.join(unknown)}"
+            )
+            + ", so cash flow uses the market rent estimate there. Ask for the rent roll.",
+        )
+    above = [
+        str(i + 1)
+        for i, (unit, rent) in enumerate(zip(units, request.rents, strict=True))
+        if rent is not None and unit.current_rent < rent
+    ]
     if above:
         out.flag(
             "rent_above_market",
@@ -322,7 +377,7 @@ def _age_band(request: AnalyzeRequest, config: Config, out: _Assembly) -> tuple[
         )
     else:
         year_built = request.year_built
-        out.line("year_built", "Year built", year_built, "number", "actual", "entered")
+        out.line("year_built", "Year built", year_built, "number", "actual", "entered", given=True)
     band = config.settings.underwriting.age_band(year_built)
     name = "newest band" if band.built_before is None else f"built before {band.built_before}"
     for key, label, value in (
@@ -492,6 +547,7 @@ def _flood(request: AnalyzeRequest, config: Config, unit_count: int, out: _Assem
             "estimated",
             "placeholder: in a flood zone",
             flagged=True,
+            given=True,
         )
         out.flag(
             "flood_zone",
@@ -550,6 +606,25 @@ def _tax_rate(
                 "over total home value.",
             )
         return rate
+    if request.tax_bill:
+        # No county rate, but the last bill is a real figure: better than a blind stand-in.
+        rate = request.tax_bill / request.price
+        out.line(
+            "tax_rate",
+            label,
+            rate,
+            "percent",
+            "estimated",
+            "last tax bill over price; county rate not loaded",
+            flagged=True,
+        )
+        out.flag(
+            "tax_rate_from_bill",
+            "warning",
+            "The county tax rate is not loaded, so taxes equal the last bill. A sale can "
+            "trigger a reassessment and a higher bill.",
+        )
+        return rate
     rate = config.settings.when_unknown.tax_rate
     out.line(
         "tax_rate",
@@ -607,9 +682,9 @@ def assemble_deal(
 ) -> tuple[DealInputs, list[InputLine], list[Flag], Place | None]:
     """Build engine inputs plus the list of where each one came from."""
     underwriting = config.settings.underwriting
-    out = _Assembly()
+    out = _Assembly(request.provenance)
 
-    out.line("price", "Price", request.price, "money", "actual", "entered")
+    out.line("price", "Price", request.price, "money", "actual", "entered", given=True)
     place = _locate(request, out)
     paid_by, said = _who_pays_utilities(request, config)
     units = _units(request, config, market, paid_by, out)
@@ -641,9 +716,12 @@ def assemble_deal(
             "money_year",
             "actual",
             "entered; taxes never go below it",
+            given=True,
         )
     if request.hoa_month:
-        out.line("hoa", "HOA dues", request.hoa_month, "money_month", "actual", "entered")
+        out.line(
+            "hoa", "HOA dues", request.hoa_month, "money_month", "actual", "entered", given=True
+        )
     out.line(
         "misc",
         "Misc",
@@ -665,7 +743,7 @@ def assemble_deal(
     rehab = underwriting.rehab_per_unit.get("none", 0.0) * unit_count
     if request.rehab is not None:
         rehab = request.rehab
-        out.line("rehab", "Rehab", rehab, "money", "override", "entered")
+        out.line("rehab", "Rehab", rehab, "money", "override", "entered", given=True)
     if request.credits:
         out.line("credits", "Seller credits", request.credits, "money", "actual", "entered")
 

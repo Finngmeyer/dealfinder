@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 
 
@@ -10,5 +11,6 @@ def short_date(day: date) -> str:
     return f"{day:%b} {day.day}, {day.year}"
 
 
-def money_list(values: list[float]) -> str:
-    return ", ".join(f"${value:,.0f}" for value in values)
+def money_list(values: Sequence[float | None]) -> str:
+    """'$1,100, $1,100, unknown' for a list of amounts, some of which may be missing."""
+    return ", ".join("unknown" if value is None else f"${value:,.0f}" for value in values)

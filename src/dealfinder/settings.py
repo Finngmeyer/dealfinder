@@ -233,6 +233,67 @@ class Classify(Strict):
         return triggered[0] if triggered else "none"
 
 
+class Stage1(Strict):
+    min_cash_flow_per_door_month: float | None
+    min_rent_to_price: float | None = Field(ge=0)
+
+
+class Stage2(Strict):
+    rent_estimates: bool
+    max_rent_requests_per_run: int = Field(ge=0)
+    rent_comp_count: int = Field(ge=5, le=25)
+    rent_cache_days: float = Field(ge=0)
+    flood_zones: bool
+    flood_cache_days: float = Field(ge=0)
+    llm: bool
+
+
+class Funnel(Strict):
+    stage1: Stage1
+    stage2: Stage2
+
+
+class Scale(Strict):
+    """Points rise in a straight line from none at ``zero_at`` to ``weight`` at ``full_at``."""
+
+    weight: float = Field(ge=0)
+    zero_at: float
+    full_at: float
+
+
+class SubScale(Strict):
+    points: float = Field(ge=0)
+    full_at: float = Field(gt=0)
+
+
+class Motivation(Strict):
+    weight: float = Field(ge=0)
+    days_on_market: SubScale
+    price_cut: SubScale
+    tag_points: float = Field(ge=0)
+    tags: list[str]
+    listing_types: list[str]
+
+
+class Penalties(Strict):
+    flood_zone: float = Field(ge=0)
+    high_hazard: float = Field(ge=0)
+
+
+class Scoring(Strict):
+    cash_flow_per_door: Scale
+    coc: Scale
+    dscr: Scale
+    cap_rate_vs_county: Scale
+    price_per_door_vs_county: Scale
+    rent_upside: Scale
+    seller_motivation: Motivation
+    county_sample_min: int = Field(ge=1)
+    penalties: Penalties
+    confidence_multiplier: dict[Literal["high", "medium", "low"], float]
+    grades: dict[str, float]
+
+
 class Settings(Strict):
     buy_box: BuyBox
     underwriting: Underwriting
@@ -247,6 +308,8 @@ class Settings(Strict):
     sweep: Sweep
     dedupe: Dedupe
     classify: Classify
+    funnel: Funnel
+    scoring: Scoring
 
 
 class CountyLimits(Strict):

@@ -8,9 +8,10 @@ from rich import box
 from rich.console import Console
 from rich.table import Table
 
-from dealfinder.analysis import AnalysisResult, AnalyzeRequest, InputLine, base_rate
+from dealfinder.analysis import DISCLAIMER, AnalysisResult, AnalyzeRequest, InputLine, base_rate
 from dealfinder.classify.classifier import Classification
 from dealfinder.market.context import MarketContext
+from dealfinder.pipeline.report import DealRow, ProblemRow
 from dealfinder.pipeline.sweep import SweepPlan
 from dealfinder.settings import Config
 from dealfinder.store.tables import ListingRow, RunRow
@@ -494,6 +495,71 @@ def render_listings(rows: Sequence[ListingRow], console: Console) -> None:
             address,
             row.source,
             "" if row.days_on_market is None else str(row.days_on_market),
+        )
+    console.print(table)
+
+
+def render_report(
+    rows: Sequence[DealRow], scenario: str, console: Console, *, total: int | None = None
+) -> None:
+    if not rows:
+        console.print(
+            "No underwritten deals to show. Run: dealfinder underwrite", style="dim", markup=False
+        )
+        return
+    table = _table(
+        "#", "Grade", "Score", "CF/door", "CoC", "DSCR", "Cap", "Price", "Units", "Box", "Stage",
+        "Address",
+        numeric_from=0,
+    )  # fmt: skip
+    table.columns[1].justify = "center"
+    table.columns[9].justify = "center"
+    table.columns[11].justify = "left"
+    estimated = False
+    for rank, row in enumerate(rows, start=1):
+        guess = row.rents_stated == 0
+        estimated = estimated or guess
+        table.add_row(
+            str(rank),
+            row.grade or "",
+            "" if row.score is None else f"{row.score:.0f}",
+            money(row.cash_flow_door_month) + ("~" if guess else ""),
+            percent(row.coc, 1),
+            ratio(row.dscr, 2),
+            percent(row.cap_rate, 1),
+            money(row.price),
+            "?" if row.units is None else f"{row.units}{'?' if row.type_match != 'yes' else ''}",
+            "yes" if row.in_buy_box else "",
+            str(row.stage),
+            row.full_address,
+        )
+    console.print(f"Ranked by cash flow per door under {scenario}.", markup=False)
+    console.print(table)
+    notes = []
+    if total is not None and total > len(rows):
+        notes.append(f"Showing {len(rows)} of {total}.")
+    if estimated:
+        notes.append("~ no rent is stated in the listing: cash flow rests on rent estimates.")
+    notes.append("Stage 1 = free data only; stage 2 = enriched with rent estimates and records.")
+    console.print(" ".join(notes), style="dim", markup=False)
+    console.print(DISCLAIMER, style="dim", markup=False)
+
+
+def render_problems(rows: Sequence[ProblemRow], console: Console) -> None:
+    if not rows:
+        console.print("Every listing of a wanted type was underwritten.", style="dim")
+        return
+    table = _table("Price", "Type", "Units", "Address", "Why it could not be underwritten")
+    for index in (1, 3, 4):
+        table.columns[index].justify = "left"
+    for row in rows:
+        guess = "?" if row.unit_confidence in (None, "low") else ""
+        table.add_row(
+            money(row.price),
+            row.kind.replace("_", " "),
+            "?" if row.units is None else f"{row.units}{guess}",
+            ", ".join(part for part in (row.address, row.city, row.state) if part),
+            row.problem,
         )
     console.print(table)
 

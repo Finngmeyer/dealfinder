@@ -340,3 +340,83 @@ class TestRequestValidation:
             request(rents=[])
         with pytest.raises(ValidationError):
             request(rents=[1_000, -5])
+
+
+class TestUnknownRents:
+    def test_a_unit_without_a_rent_uses_the_market_estimate(self, config):
+        result = analyze(
+            request(rents=[1_100, 1_100, 1_100, None], market_rents=[1_300] * 4), config
+        )
+        assert [unit.current_rent for unit in result.deal.units] == [1_100, 1_100, 1_100, 1_300]
+        assert line(result, "rents").value == 3_300
+        assert line(result, "rents").source == "entered: $1,100, $1,100, $1,100, unknown"
+        flag = next(flag for flag in result.flags if flag.code == "rents_estimated")
+        assert flag.message.startswith("No rent is known for unit 4")
+
+    def test_no_rents_at_all(self, config):
+        result = analyze(request(rents=[None] * 4, market_rents=[1_300] * 4), config)
+        assert result.statement.gsr == 1_300 * 4 * 12
+        assert all(item.key != "rents" for item in result.inputs)
+        flag = next(flag for flag in result.flags if flag.code == "rents_estimated")
+        assert flag.message.startswith("No current rents are known")
+
+    def test_a_unit_with_neither_cannot_be_underwritten(self, config):
+        with pytest.raises(AnalysisError, match="No rent is known for unit 2, 4"):
+            analyze(request(rents=[1_100, None, 1_100, None]), config)
+
+    def test_negative_rents_are_still_refused(self):
+        with pytest.raises(ValidationError, match="rents cannot be negative"):
+            request(rents=[1_100, -5, None, None])
+
+
+class TestProvenance:
+    def test_figures_from_a_listing_say_so(self, config):
+        from dealfinder.analysis import Provenance
+
+        result = analyze(
+            request(
+                year_built=1962,
+                tax_bill=4_100,
+                rehab=20_000,
+                provenance={
+                    "price": Provenance(source="list price, RentCast listing"),
+                    "rents": Provenance(source="stated in the listing"),
+                    "year_built": Provenance(source="RentCast listing"),
+                    "tax_bill": Provenance(source="county record via RentCast, 2025"),
+                    "rehab": Provenance(
+                        source="from the listing's tags", kind="estimated", flagged=True
+                    ),
+                },
+            ),
+            config,
+        )
+        assert line(result, "price").source == "list price, RentCast listing"
+        assert line(result, "rents").source.startswith("stated in the listing: $1,350")
+        assert line(result, "year_built").source == "RentCast listing"
+        assert line(result, "tax_bill").source == "county record via RentCast, 2025"
+        rehab = line(result, "rehab")
+        assert (rehab.kind, rehab.flagged) == ("estimated", True)
+
+    def test_a_note_is_ignored_when_the_figure_was_not_given(self, config):
+        from dealfinder.analysis import Provenance
+
+        # No year built came with the request, so the stand-in keeps its own wording.
+        result = analyze(
+            request(provenance={"year_built": Provenance(source="RentCast listing")}), config
+        )
+        assert line(result, "year_built").source == "oldest band assumed"
+
+
+class TestTaxesWithoutACountyRate:
+    def test_the_last_bill_stands_in_for_the_rate(self, config):
+        result = analyze(request(tax_bill=5_760), config)
+        assert result.statement.taxes == pytest.approx(5_760)
+        rate = line(result, "tax_rate")
+        assert rate.value == pytest.approx(0.012) and rate.flagged
+        assert rate.source == "last tax bill over price; county rate not loaded"
+        assert "tax_rate_from_bill" in codes(result) and "tax_rate_unknown" not in codes(result)
+
+    def test_an_entered_rate_still_wins_and_the_bill_is_a_floor(self, config):
+        result = analyze(request(tax_bill=5_760, tax_rate=0.02), config)
+        assert result.statement.taxes == pytest.approx(9_600)
+        assert "tax_rate_from_bill" not in codes(result)

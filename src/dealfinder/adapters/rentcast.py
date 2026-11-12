@@ -28,6 +28,7 @@ SOURCE = "rentcast"
 BASE_URL = "https://api.rentcast.io/v1"
 LISTINGS_URL = f"{BASE_URL}/listings/sale"
 PROPERTIES_URL = f"{BASE_URL}/properties"
+RENT_URL = f"{BASE_URL}/avm/rent/long-term"
 TOTAL_HEADER = "X-Total-Count"
 
 # Buy-box property type -> RentCast's propertyType.
@@ -49,6 +50,18 @@ KINDS: dict[str, PropertyKind] = {
     "Multi-Family": "multifamily_2_4",
     "Apartment": "multifamily_5plus",
     "Land": "land",
+}
+# What to call a property kind when asking for a rent estimate of one of its units.
+RENT_TYPES: dict[str, str] = {
+    "sfr": "Single Family",
+    "condo": "Condo",
+    "townhouse": "Townhouse",
+    "manufactured": "Manufactured",
+    "duplex": "Multi-Family",
+    "triplex": "Multi-Family",
+    "fourplex": "Multi-Family",
+    "multifamily_2_4": "Multi-Family",
+    "multifamily_5plus": "Apartment",
 }
 _STATUSES = {"active": "active", "inactive": "off_market"}
 
@@ -190,6 +203,64 @@ def parse_property(body: bytes) -> PropertyRecord:
     )
 
 
+class RentComp(BaseModel):
+    address: str | None
+    rent: float | None
+    bedrooms: float | None
+    bathrooms: float | None
+    sqft: float | None
+    distance_miles: float | None
+    days_old: int | None
+    correlation: float | None  # RentCast's 0-1 similarity to the subject
+
+
+class RentEstimate(BaseModel):
+    """RentCast's rent estimate for ONE unit of the given layout, with its comparables."""
+
+    rent: float
+    low: float | None
+    high: float | None
+    comps: list[RentComp]
+
+    def describe(self) -> str:
+        spread = (
+            f" (range ${self.low:,.0f} to ${self.high:,.0f})"
+            if self.low is not None and self.high is not None
+            else ""
+        )
+        return f"RentCast rent estimate from {len(self.comps)} comparable rentals{spread}"
+
+
+def parse_rent_estimate(body: bytes) -> RentEstimate:
+    try:
+        data = json.loads(body)
+    except ValueError as error:
+        raise SourceUnavailable(SOURCE, "the rent estimate was not JSON") from error
+    rent = _number(data.get("rent")) if isinstance(data, dict) else None
+    if rent is None or rent <= 0:
+        raise SourceUnavailable(SOURCE, "the response held no rent estimate")
+    comps = data.get("comparables") if isinstance(data.get("comparables"), list) else []
+    return RentEstimate(
+        rent=rent,
+        low=_number(data.get("rentRangeLow")),
+        high=_number(data.get("rentRangeHigh")),
+        comps=[
+            RentComp(
+                address=_text(comp.get("formattedAddress")),
+                rent=_number(comp.get("price")),
+                bedrooms=_number(comp.get("bedrooms")),
+                bathrooms=_number(comp.get("bathrooms")),
+                sqft=_number(comp.get("squareFootage")),
+                distance_miles=_number(comp.get("distance")),
+                days_old=None if _number(comp.get("daysOld")) is None else int(comp["daysOld"]),
+                correlation=_number(comp.get("correlation")),
+            )
+            for comp in comps
+            if isinstance(comp, dict)
+        ],
+    )
+
+
 class RentCastSource:
     """The RentCast listing source."""
 
@@ -237,6 +308,51 @@ class RentCastSource:
         if since is not None:
             query["daysOld"] = f"*:{max(1, (self._today() - since).days)}"
         return query
+
+    def rent_estimate(
+        self,
+        *,
+        address: str,
+        kind: str,
+        bedrooms: float,
+        bathrooms: float | None,
+        sqft: float | None,
+        comp_count: int,
+        cache_days: float,
+    ) -> RentEstimate:
+        """RentCast's long-term rent estimate for one unit of this layout at this address.
+
+        For a multifamily building RentCast prices a single unit, and only reliably when it is
+        told the unit's own bedrooms, bathrooms and size and told not to look the building up:
+        left to itself it fills the gaps with the whole building's totals.
+
+        One billed request unless a copy is still cached. Raises BudgetExceeded past the cap
+        and SourceUnavailable when there is no key or no estimate.
+        """
+        if not self._api_key:
+            raise SourceUnavailable(SOURCE, "RENTCAST_API_KEY is not set", missing_key=True)
+        params = {
+            "address": address,
+            "propertyType": RENT_TYPES.get(kind, "Multi-Family"),
+            "bedrooms": f"{bedrooms:g}",
+            "compCount": str(comp_count),
+            "lookupSubjectAttributes": "false",
+        }
+        if bathrooms is not None:
+            params["bathrooms"] = f"{bathrooms:g}"
+        if sqft is not None:
+            params["squareFootage"] = f"{sqft:.0f}"
+        fetched = self._fetcher.get(
+            SOURCE,
+            RENT_URL,
+            params=params,
+            headers={"X-Api-Key": self._api_key, "Accept": "application/json"},
+            max_age=timedelta(days=cache_days),
+            validate=parse_rent_estimate,
+            before_send=self._guard.check,
+            on_success=lambda: self._billed("avm/rent/long-term"),
+        )
+        return parse_rent_estimate(fetched.body)
 
     def _billed(self, endpoint: str) -> None:
         """RentCast bills every HTTP 200, so each one is counted the moment it arrives."""

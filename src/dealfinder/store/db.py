@@ -16,12 +16,14 @@ MIGRATIONS = Path(__file__).parent / "migrations"
 
 
 def make_engine(url: str) -> Engine:
-    """Engine for ``url``. For a SQLite file the folder is created and foreign keys are
-    switched on, which SQLite leaves off by default."""
+    """Engine for ``url``. For a SQLite file the folder is created, foreign keys are switched
+    on (SQLite leaves them off), and write-ahead logging lets the dashboard read while a
+    sweep writes."""
     parsed = make_url(url)
     is_sqlite = parsed.get_backend_name() == "sqlite"
-    if is_sqlite and parsed.database and parsed.database != ":memory:":
-        Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
+    on_disk = bool(is_sqlite and parsed.database and parsed.database != ":memory:")
+    if on_disk:
+        Path(str(parsed.database)).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(url)
     if is_sqlite:
 
@@ -29,6 +31,9 @@ def make_engine(url: str) -> Engine:
         def _enable_foreign_keys(connection, _record) -> None:  # type: ignore[no-untyped-def]
             cursor = connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=10000")  # wait for another writer, in ms
+            if on_disk:
+                cursor.execute("PRAGMA journal_mode=WAL")
             cursor.close()
 
     return engine

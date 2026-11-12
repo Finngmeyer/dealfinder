@@ -131,6 +131,38 @@ classify:
     only_below_confidence: high  # ask only when the rules are less sure than this: high | medium
     max_calls_per_run: 200
 
+funnel:                          # how listings are narrowed down before money is spent on them
+  stage1:                        # every listing, free data only. A listing is kept if EITHER holds:
+    min_cash_flow_per_door_month: -100   # cash flow per door is at least this
+    min_rent_to_price: 0.007     # monthly rent is at least this share of the price
+  stage2:                        # only the listings stage 1 keeps
+    rent_estimates: true         # RentCast rent estimate per unit layout; one billed request each
+    max_rent_requests_per_run: 20
+    rent_comp_count: 10          # comparable rentals behind each estimate, 5 to 25
+    rent_cache_days: 60          # a rent estimate is reused this long
+    flood_zones: true            # FEMA flood map lookup by coordinates; free
+    flood_cache_days: 365
+    llm: true                    # let Claude read uncertain descriptions, if classify.llm.enabled
+
+scoring:                         # deal score, 0 to 100; weights add up to 100
+  cash_flow_per_door: {weight: 25, zero_at: 0, full_at: 300}      # $ per door per month
+  coc: {weight: 20, zero_at: 0, full_at: 0.12}                    # cash-on-cash return
+  dscr: {weight: 15, zero_at: 1.0, full_at: 1.50}
+  cap_rate_vs_county: {weight: 10, zero_at: 0, full_at: 0.02}     # cap rate minus the county median
+  price_per_door_vs_county: {weight: 10, zero_at: 0, full_at: 0.30}   # share below the county median
+  rent_upside: {weight: 10, zero_at: 0, full_at: 0.20}            # market rent over rent in place
+  seller_motivation:
+    weight: 10
+    days_on_market: {points: 4, full_at: 120}
+    price_cut: {points: 4, full_at: 0.10}     # total cut from the first asking price
+    tag_points: 2                             # for each tag or listing type below that applies
+    tags: [motivated, estate_sale, bring_all_offers, as_is, cash_only]
+    listing_types: [Foreclosure, Short Sale]
+  county_sample_min: 5           # fewer underwritten listings than this in a county: no county points
+  penalties: {flood_zone: 5, high_hazard: 5}
+  confidence_multiplier: {high: 1.0, medium: 0.85, low: 0.7}     # by unit-count confidence
+  grades: {A: 80, B: 65, C: 50, D: 35}       # lowest score for each grade; below D is F
+
 financing:
   loan_limit_year: 2026          # picks config/loan_limits/<year>.yaml
   base_rate_manual: null         # your own base rate, used instead of the 30-year average

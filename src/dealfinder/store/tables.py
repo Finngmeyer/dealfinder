@@ -93,6 +93,11 @@ class PropertyRow(Base):
     lot_sqft: Mapped[float | None]
     year_built: Mapped[int | None]
 
+    # FEMA flood map lookup; all null until stage 2 has checked the property.
+    flood_zone: Mapped[str | None] = mapped_column(String(24))
+    in_flood_zone: Mapped[bool | None]
+    flood_checked_at: Mapped[datetime | None]
+
     starred: Mapped[bool] = mapped_column(Boolean, default=False)
     hidden: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
@@ -214,8 +219,33 @@ class MarketDataRow(Base):
     fetched_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
+class ScreenRow(Base):
+    """One listing's trip through the funnel: whether it could be underwritten, whether
+    stage 1 kept it, and the inputs that were used, each with its source."""
+
+    __tablename__ = "screens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    listing_id: Mapped[int] = mapped_column(ForeignKey("listings.id"), unique=True)
+    property_id: Mapped[int] = mapped_column(ForeignKey("properties.id"), index=True)
+    stage: Mapped[int]  # 0 could not be underwritten, 1 free data only, 2 enriched
+    passed_stage1: Mapped[bool | None]
+    note: Mapped[str | None] = mapped_column(Text)  # why kept, dropped or not underwritten
+    type_match: Mapped[str] = mapped_column(String(12))  # yes | unverified
+    confidence: Mapped[str | None] = mapped_column(String(8))  # of the unit count
+    price: Mapped[float | None]  # the price that was underwritten
+    request: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    inputs: Mapped[list[Any]] = mapped_column(default=list)
+    flags: Mapped[list[Any]] = mapped_column(default=list)
+    details: Mapped[dict[str, Any]] = mapped_column(default=dict)  # statement, rates, sources
+    enrichment: Mapped[dict[str, Any]] = mapped_column(default=dict)  # what stage 2 did
+    computed_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    listing: Mapped[ListingRow] = relationship()
+
+
 class UnderwritingRow(Base):
-    """One listing underwritten under one loan scenario."""
+    """One listing underwritten under one loan scenario, with its score."""
 
     __tablename__ = "underwriting"
     __table_args__ = (
@@ -229,7 +259,6 @@ class UnderwritingRow(Base):
     scenario: Mapped[str] = mapped_column(String(40))
     stage: Mapped[int]
     engine_version: Mapped[str] = mapped_column(String(16))
-    inputs: Mapped[dict[str, Any]] = mapped_column(default=dict)
     results: Mapped[dict[str, Any]] = mapped_column(default=dict)
     cash_flow_door_month: Mapped[float | None]
     coc: Mapped[float | None]
@@ -238,7 +267,9 @@ class UnderwritingRow(Base):
     mao: Mapped[float | None]
     score: Mapped[float | None]
     grade: Mapped[str | None] = mapped_column(String(1))
+    score_parts: Mapped[dict[str, Any]] = mapped_column(default=dict)
     in_buy_box: Mapped[bool | None]
+    buy_box_misses: Mapped[list[Any]] = mapped_column(default=list)  # why it is outside
     computed_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
