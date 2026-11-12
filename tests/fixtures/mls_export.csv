@@ -1,0 +1,7 @@
+MLS #,Status,Address,City,State,Zip Code,List Price,# Units,Property Type,Total Bedrooms,Total Bathrooms,Living Area,Year Built,Taxes,List Date,DOM,Public Remarks,Listing Agent,Photo Count
+A100,Active,"101 Sample St",Columbus,OH,43215,"$480,000",4,Multi-Family,8,4,"3,600",1978,"5,760.50",10/01/2026,42,"Fully rented 4-plex, each unit 2bd/1ba",Sam Sample,12
+A101,Pending,"202 Example Ave, Unit A-B",Columbus,oh,43215-1234,265000,2,Duplex,4,2,1900,1955,3100,2026-09-15,58,Duplex with long-term tenants,Sam Sample,8
+A102,Active,303 Demo Rd,Boston,MA,2134,899000,,Triplex,6,3,3000,1920,,,,Classic triple decker,,
+A103,Active,,Columbus,OH,43215,100000,,,,,,,,,,No address on this row,,
+,Active,404 Placeholder Ln,,,,150000,,Single Family,,,,,,,,No city or ZIP,,
+,,,,,,,,,,,,,,,,,,

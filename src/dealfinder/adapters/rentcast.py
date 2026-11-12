@@ -1,0 +1,258 @@
+"""RentCast sale listings, a licensed API.
+
+Every successful request is billed and RentCast has no cap of its own, so each request passes
+the budget guard just before it is sent and is recorded straight after. A page that is still in
+the on-disk cache costs nothing and is not counted.
+
+Listings carry no description, unit count or tax bill. A "Multi-Family" listing is a building
+of two to four units; which of those it is has to come from elsewhere.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from collections.abc import Callable, Iterator, Sequence
+from datetime import date, datetime, timedelta
+from typing import Any
+
+from dealfinder.http import Fetcher, SourceUnavailable
+from dealfinder.models import CallEstimate, Geo, Listing, PriceChange, PropertyKind, RawPage
+from dealfinder.settings import PropertyType, Sweep
+from dealfinder.store.usage import BudgetGuard
+
+SOURCE = "rentcast"
+BASE_URL = "https://api.rentcast.io/v1"
+LISTINGS_URL = f"{BASE_URL}/listings/sale"
+TOTAL_HEADER = "X-Total-Count"
+
+# Buy-box property type -> RentCast's propertyType.
+RAW_TYPES: dict[str, str] = {
+    "sfr": "Single Family",
+    "condo": "Condo",
+    "townhouse": "Townhouse",
+    "duplex": "Multi-Family",
+    "triplex": "Multi-Family",
+    "fourplex": "Multi-Family",
+    "multifamily_5plus": "Apartment",
+}
+# RentCast's propertyType -> what the listing is, as far as RentCast can say.
+KINDS: dict[str, PropertyKind] = {
+    "Single Family": "sfr",
+    "Condo": "condo",
+    "Townhouse": "townhouse",
+    "Manufactured": "manufactured",
+    "Multi-Family": "multifamily_2_4",
+    "Apartment": "multifamily_5plus",
+    "Land": "land",
+}
+_STATUSES = {"active": "active", "inactive": "off_market"}
+
+
+def raw_types(types: Sequence[PropertyType]) -> list[str]:
+    """RentCast property types covering the buy-box types, without repeats."""
+    return sorted({RAW_TYPES[kind] for kind in types})
+
+
+def _day(value: Any) -> date | None:
+    """Date from RentCast's ISO timestamps such as '2024-06-24T00:00:00.000Z'."""
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _text(value: Any) -> str | None:
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def parse_page(body: bytes) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(body)
+    except ValueError as error:
+        raise SourceUnavailable(SOURCE, "the response was not JSON") from error
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise SourceUnavailable(SOURCE, "the response was not a list of listings")
+    return data
+
+
+def to_listing(raw: dict[str, Any]) -> Listing:
+    """Translate one RentCast sale listing."""
+    listing_id = _text(raw.get("id"))
+    if listing_id is None:
+        raise ValueError("a RentCast listing without an id")
+    raw_type = _text(raw.get("propertyType"))
+    state_fips, county_code = _text(raw.get("stateFips")), _text(raw.get("countyFips"))
+    agent = raw.get("listingAgent") if isinstance(raw.get("listingAgent"), dict) else {}
+    office = raw.get("listingOffice") if isinstance(raw.get("listingOffice"), dict) else {}
+    hoa = raw.get("hoa") if isinstance(raw.get("hoa"), dict) else {}
+    history = raw.get("history") if isinstance(raw.get("history"), dict) else {}
+    year_built = _number(raw.get("yearBuilt"))
+    days_on_market = _number(raw.get("daysOnMarket"))
+    return Listing(
+        source=SOURCE,
+        source_listing_id=listing_id,
+        status=_STATUSES.get(str(raw.get("status", "")).lower(), "unknown"),  # type: ignore[arg-type]
+        price=_number(raw.get("price")),
+        address_line1=_text(raw.get("addressLine1")),
+        address_line2=_text(raw.get("addressLine2")),
+        city=_text(raw.get("city")),
+        state=_text(raw.get("state")),
+        zip_code=_text(raw.get("zipCode")),
+        county_fips=(
+            state_fips.zfill(2) + county_code.zfill(3) if state_fips and county_code else None
+        ),
+        latitude=_number(raw.get("latitude")),
+        longitude=_number(raw.get("longitude")),
+        property_kind=KINDS.get(raw_type or "", "other"),
+        property_type_raw=raw_type,
+        bedrooms=_number(raw.get("bedrooms")),
+        bathrooms=_number(raw.get("bathrooms")),
+        building_sqft=_number(raw.get("squareFootage")),
+        lot_sqft=_number(raw.get("lotSize")),
+        year_built=None if year_built is None else int(year_built),
+        hoa_fee_month=_number(hoa.get("fee")),
+        listed_date=_day(raw.get("listedDate")),
+        removed_date=_day(raw.get("removedDate")),
+        days_on_market=None if days_on_market is None else int(days_on_market),
+        listing_type=_text(raw.get("listingType")),
+        mls_name=_text(raw.get("mlsName")),
+        mls_number=_text(raw.get("mlsNumber")),
+        agent_name=_text(agent.get("name")),
+        agent_phone=_text(agent.get("phone")),
+        office_name=_text(office.get("name")),
+        history=[
+            PriceChange(
+                day=day, event=str(entry.get("event", "")), price=_number(entry.get("price"))
+            )
+            for key, entry in sorted(history.items())
+            if isinstance(entry, dict) and (day := _day(key)) is not None
+        ],
+        raw=raw,
+    )
+
+
+class RentCastSource:
+    """The RentCast listing source."""
+
+    name = SOURCE
+    env_vars: tuple[str, ...] = ("RENTCAST_API_KEY",)
+    is_scraper = False
+
+    def __init__(
+        self,
+        fetcher: Fetcher,
+        *,
+        api_key: str | None,
+        guard: BudgetGuard,
+        sweep: Sweep,
+        max_price: float | None,
+        inventory: Callable[[str], int | None] = lambda scope: None,
+        today: Callable[[], date] = lambda: datetime.now().date(),
+    ) -> None:
+        self._fetcher = fetcher
+        self._api_key = api_key
+        self._guard = guard
+        self._sweep = sweep
+        self._max_price = max_price if sweep.filter_by_max_price else None
+        self._inventory = inventory
+        self._today = today
+
+    def scope(self, geo: Geo, types: Sequence[PropertyType]) -> str:
+        """A label for one search: state, property types and the price filter. Checkpoints and
+        inventory counts are kept per scope."""
+        price = f"|<={self._max_price:.0f}" if self._max_price else ""
+        return f"{geo.state}|{'|'.join(raw_types(types))}{price}"
+
+    def _query(self, geo: Geo, types: Sequence[PropertyType], since: date | None) -> dict[str, str]:
+        query = {
+            "state": geo.state,
+            "propertyType": "|".join(raw_types(types)),
+            "status": "Active",
+            "limit": str(self._sweep.page_size),
+        }
+        if self._max_price:
+            query["price"] = f"*:{self._max_price:.0f}"
+        if since is not None:
+            query["daysOld"] = f"*:{max(1, (self._today() - since).days)}"
+        return query
+
+    def pages(
+        self,
+        geo: Geo,
+        types: Sequence[PropertyType],
+        since: date | None = None,
+        *,
+        start_offset: int = 0,
+        max_pages: int | None = None,
+    ) -> Iterator[RawPage]:
+        """Pages of raw listings, newest first, starting at ``start_offset``.
+
+        Raises BudgetExceeded when the next request would go past the cap, and
+        SourceUnavailable when RentCast cannot be reached or has no key.
+        """
+        if not self._api_key:
+            raise SourceUnavailable(SOURCE, "RENTCAST_API_KEY is not set", missing_key=True)
+        query = self._query(geo, types, since)
+        size = self._sweep.page_size
+        offset = start_offset
+        fetched_pages = 0
+        while max_pages is None or fetched_pages < max_pages:
+            params = {**query, "offset": str(offset)}
+            if offset == 0:
+                params["includeTotalCount"] = "true"  # slow, so only asked for once
+            fetched = self._fetcher.get(
+                SOURCE,
+                LISTINGS_URL,
+                params=params,
+                headers={"X-Api-Key": self._api_key, "Accept": "application/json"},
+                max_age=timedelta(hours=self._sweep.page_cache_hours),
+                validate=parse_page,
+                before_send=self._guard.check,
+                keep_headers=(TOTAL_HEADER,),
+            )
+            if fetched.stale:
+                raise SourceUnavailable(SOURCE, "RentCast could not be reached for a fresh page")
+            if not fetched.from_cache:
+                self._guard.record("listings/sale")
+            items = parse_page(fetched.body)
+            total = fetched.headers.get(TOTAL_HEADER, "")
+            yield RawPage(
+                offset=offset,
+                items=items,
+                total=int(total) if total.isdigit() else None,
+                from_cache=fetched.from_cache,
+            )
+            fetched_pages += 1
+            if len(items) < size:
+                return
+            offset += size
+
+    def search(
+        self, geo: Geo, types: Sequence[PropertyType], since: date | None
+    ) -> Iterator[dict[str, Any]]:
+        for page in self.pages(geo, types, since):
+            yield from page.items
+
+    def estimate_calls(self, geo: Geo, types: Sequence[PropertyType]) -> CallEstimate:
+        """Requests a full search of this state would take, from the last count on hand."""
+        total = self._inventory(self.scope(geo, types))
+        if total is None:
+            return CallEstimate(calls=1, known=False, note="no count yet: at least one request")
+        # A full page means "ask again", so an exact multiple of the page size costs one extra.
+        calls = total // self._sweep.page_size + 1
+        return CallEstimate(
+            calls=calls,
+            known=True,
+            note=f"{total:,} listings last counted, {math.ceil(total / self._sweep.page_size)} "
+            "full or partial pages",
+        )
+
+    def to_listing(self, raw: dict[str, Any]) -> Listing:
+        return to_listing(raw)

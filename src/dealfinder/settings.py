@@ -170,6 +170,44 @@ class Market(Strict):
     cache_days: CacheDays
 
 
+class SourceSwitch(Strict):
+    enabled: bool
+
+
+class ProviderBudget(Strict):
+    plan: str
+    monthly_request_cap: int | None = Field(ge=0)  # None removes the cap
+    billing_cycle_day: int = Field(ge=1, le=31)
+
+
+class Budgets(Strict):
+    rentcast: ProviderBudget
+
+
+class Plan(Strict):
+    monthly_fee: float = Field(ge=0)
+    included: int = Field(ge=0)
+    overage: float = Field(ge=0)
+
+    def cost(self, requests: int) -> float:
+        """Monthly bill for a number of requests on this plan."""
+        return self.monthly_fee + max(0, requests - self.included) * self.overage
+
+
+class Sweep(Strict):
+    page_size: int = Field(ge=1, le=500)
+    filter_by_max_price: bool
+    daily_days_old: int = Field(ge=1)
+    page_cache_hours: float = Field(ge=0)
+    completeness_tolerance: float = Field(ge=0, lt=1)
+    missed_sweeps_before_off_market: int = Field(ge=1)
+
+
+class Dedupe(Strict):
+    radius_m: float = Field(gt=0)
+    price_tolerance: float = Field(ge=0, lt=1)
+
+
 class Settings(Strict):
     buy_box: BuyBox
     underwriting: Underwriting
@@ -178,6 +216,11 @@ class Settings(Strict):
     sensitivity: list[Shock]
     financing: Financing
     market: Market
+    sources: dict[str, SourceSwitch]
+    budgets: Budgets
+    rentcast_plans: dict[str, Plan]
+    sweep: Sweep
+    dedupe: Dedupe
 
 
 class CountyLimits(Strict):

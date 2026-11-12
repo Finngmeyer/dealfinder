@@ -2,19 +2,34 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
 import yaml
 from pydantic import ValidationError
 from rich.console import Console
+from sqlalchemy import Engine, select
 
+from dealfinder.adapters.rentcast import RentCastSource
 from dealfinder.analysis import AnalysisError, AnalyzeRequest, analyze
 from dealfinder.geo import normalize_zip
 from dealfinder.http import Fetcher
 from dealfinder.market.context import MarketContext, load_market
-from dealfinder.render import render_analysis, render_market
+from dealfinder.pipeline.importer import CsvImportError, import_csv
+from dealfinder.pipeline.sweep import Mode, SweepError, plan_sweep, run_sweep, sweep_states
+from dealfinder.render import (
+    render_analysis,
+    render_listings,
+    render_market,
+    render_plan,
+    render_usage,
+)
 from dealfinder.settings import Config, Environment, SettingsError, load_config
+from dealfinder.store import repo
+from dealfinder.store.db import open_database, session_scope
+from dealfinder.store.tables import ListingRow, PropertyRow, RunRow
+from dealfinder.store.usage import BudgetGuard
 
 app = typer.Typer(
     add_completion=False,
@@ -243,6 +258,173 @@ def settings_command() -> None:
     console.print(
         yaml.safe_dump(config.settings.model_dump(mode="json"), sort_keys=False), markup=False
     )
+
+
+# ---- listings: sweeps, imports, usage --------------------------------------------------------
+
+
+def _load() -> tuple[Config, Environment, Engine]:
+    """Config, environment and a database with its schema up to date."""
+    try:
+        config = load_config()
+    except SettingsError as error:
+        raise _fail(str(error)) from error
+    environment = Environment()
+    return config, environment, open_database(environment.dealfinder_db_url)
+
+
+def _rentcast(
+    config: Config, environment: Environment, engine: Engine, fetcher: Fetcher
+) -> tuple[RentCastSource, BudgetGuard]:
+    budget = config.settings.budgets.rentcast
+    guard = BudgetGuard(
+        engine, "rentcast", cap=budget.monthly_request_cap, cycle_day=budget.billing_cycle_day
+    )
+
+    def last_count(scope: str) -> int | None:
+        with session_scope(engine) as session:
+            return repo.inventory_total(session, "rentcast", scope)
+
+    key = environment.rentcast_api_key
+    source = RentCastSource(
+        fetcher,
+        api_key=key.get_secret_value() if key else None,
+        guard=guard,
+        sweep=config.settings.sweep,
+        max_price=config.settings.buy_box.max_price,
+        inventory=last_count,
+    )
+    return source, guard
+
+
+def _sweep(mode: Mode, states: str | None, dry_run: bool, fresh: bool) -> None:
+    config, environment, engine = _load()
+    console = Console()
+    if not config.settings.sources["rentcast"].enabled:
+        raise _fail("RentCast is switched off in settings (sources.rentcast.enabled).")
+    try:
+        chosen = sweep_states(config, states.split(",") if states else None)
+    except SweepError as error:
+        raise _fail(str(error)) from error
+    types = config.settings.buy_box.property_types
+    fetcher = Fetcher(environment.cache_dir, offline=environment.dealfinder_offline)
+    try:
+        source, guard = _rentcast(config, environment, engine, fetcher)
+        plan = plan_sweep(source, guard, config, mode=mode, states=chosen, types=types)
+        if dry_run:
+            render_plan(plan, console)
+            return
+        if not environment.rentcast_api_key:
+            raise _fail(
+                "RentCast is off: RENTCAST_API_KEY is not set. Add it to .env, or use "
+                "--dry-run to see what a sweep would cost."
+            )
+        report = run_sweep(
+            engine, config, source, guard, mode=mode, states=chosen, types=types, fresh=fresh
+        )
+    finally:
+        fetcher.close()
+    style = {"completed": None, "stopped_budget": "yellow", "failed": "red"}[report.status]
+    console.print(report.text(), style=style, markup=False)
+    if report.status == "failed":
+        raise typer.Exit(code=1)
+
+
+@app.command("sweep")
+def sweep_command(
+    mode: Annotated[str, typer.Option(help="weekly: every active listing. daily: new ones only.")],
+    states: Annotated[
+        str | None, typer.Option(help="Comma-separated states, e.g. OH,IN. Default: the buy box.")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show expected requests and cost; fetch nothing.")
+    ] = False,
+    fresh: Annotated[
+        bool, typer.Option("--fresh", help="Start a new run instead of resuming an unfinished one.")
+    ] = False,
+) -> None:
+    """Fetch listings from RentCast, state by state, within the request budget."""
+    if mode not in ("daily", "weekly"):
+        raise typer.BadParameter("Use daily or weekly.", param_hint="--mode")
+    _sweep(mode, states, dry_run, fresh)  # type: ignore[arg-type]
+
+
+@app.command("probe")
+def probe_command(
+    states: Annotated[
+        str | None, typer.Option(help="Comma-separated states. Default: the buy box.")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show expected requests; fetch nothing.")
+    ] = False,
+    fresh: Annotated[
+        bool, typer.Option("--fresh", help="Start a new run instead of resuming an unfinished one.")
+    ] = False,
+) -> None:
+    """Count each state's listings with one request per state, keeping what comes back."""
+    _sweep("probe", states, dry_run, fresh)
+
+
+@app.command("import-csv")
+def import_csv_command(
+    path: Annotated[Path, typer.Argument(help="CSV file of listings.")],
+    mapping: Annotated[
+        str,
+        typer.Option(
+            help="Name for this file layout. Guessed and saved the first time it is used."
+        ),
+    ],
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Check the file and mapping; store nothing.")
+    ] = False,
+) -> None:
+    """Import your own list: an agent's MLS export, a LoopNet download, a wholesaler's sheet."""
+    config, _, engine = _load()
+    if not config.settings.sources["csv"].enabled:
+        raise _fail("CSV import is switched off in settings (sources.csv.enabled).")
+    try:
+        report = import_csv(engine, config, path, mapping, dry_run=dry_run)
+    except CsvImportError as error:
+        raise _fail(str(error)) from error
+    console = Console()
+    console.print(report.text(), markup=False)
+    if report.mapping_created:
+        console.print("\nColumns were matched like this. Edit the mapping file if any are wrong:")
+        for field, column in report.mapping.columns.items():
+            console.print(f"  {field}: {column}", markup=False)
+
+
+@app.command("usage")
+def usage_command() -> None:
+    """Show what has been spent of the RentCast request budget, and recent runs."""
+    config, environment, engine = _load()
+    fetcher = Fetcher(environment.cache_dir, offline=True)
+    try:
+        _, guard = _rentcast(config, environment, engine, fetcher)
+    finally:
+        fetcher.close()
+    with session_scope(engine) as session:
+        runs = session.scalars(select(RunRow).order_by(RunRow.id.desc()).limit(10)).all()
+        render_usage(guard, config, runs, Console())
+
+
+@app.command("listings")
+def listings_command(
+    state: Annotated[str | None, typer.Option(help="Two-letter state.")] = None,
+    status: Annotated[
+        str, typer.Option(help="active, pending, off_market, sold or all.")
+    ] = "active",
+    limit: Annotated[int, typer.Option(help="How many to show.")] = 25,
+) -> None:
+    """List stored listings, cheapest first. Ranking by cash flow arrives with the dashboard."""
+    _, _, engine = _load()
+    query = select(ListingRow).join(PropertyRow).order_by(ListingRow.price.asc().nulls_last())
+    if status != "all":
+        query = query.where(ListingRow.status == status)
+    if state:
+        query = query.where(PropertyRow.state == state.upper())
+    with session_scope(engine) as session:
+        render_listings(session.scalars(query.limit(limit)).all(), Console())
 
 
 if __name__ == "__main__":

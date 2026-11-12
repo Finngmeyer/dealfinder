@@ -1,0 +1,8 @@
+MLS #,Status,Address,City,State,Zip Code,List Price,# Units,Property Type,Total Bedrooms,Total Bathrooms,Living Area,Year Built,Taxes,List Date,DOM,Public Remarks
+EX-1001,Active,101 Sample St,Columbus,OH,43215,"$480,000",4,Multi-Family,8,4,"3,600",1978,"5,760",10/01/2026,42,"Fully rented 4-plex, each unit 2bd/1ba. Tenants pay electric and gas."
+EX-1002,Active,202 Example Ave,Columbus,OH,43206,"$349,900",,Multi-Family,8,4,"3,200",1925,"4,210",09/02/2026,71,"Quadplex with separate meters. Investor special, needs work, cash only."
+EX-1003,Active,303 Demo Rd,Dayton,OH,45402,"$289,000",,Multi-Family,6,4,"2,900",1958,"3,950",10/20/2026,23,"Unit 4 is vacant; units 1-3 leased at $1,100. Value-add opportunity."
+EX-1004,Active,404 Placeholder Ln,Cleveland,OH,44113,"$265,000",2,Duplex,4,2,"1,900",1955,"3,100",09/15/2026,58,"Duplex with 4 bedrooms and a 4 car garage. Long-term tenants."
+EX-1005,Active,505 Madeup Blvd,Toledo,OH,43604,"$1,150,000",,Multi-Family,24,12,"9,800",1969,"14,300",08/01/2026,103,"Two fourplexes on one lot, sold together. Motivated seller, bring all offers."
+EX-1006,Pending,606 Fictional Way,Akron,OH,44308,"$389,000",,Multi-Family,7,4,"3,300",1948,"4,480",10/05/2026,38,"Triplex plus detached ADU, 4 units total. Below-market rents."
+EX-1007,Active,707 Invented Ct,Cincinnati,OH,45202,"$95,000",,Land,,,,,"900",07/15/2026,120,"Lot zoned for a fourplex. Bring your builder."

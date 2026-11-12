@@ -86,6 +86,38 @@ market:
     zori: 30
     nri: 180
 
+sources:                         # where listings come from
+  rentcast: {enabled: true}      # licensed API; needs RENTCAST_API_KEY
+  csv: {enabled: true}           # your own files: MLS exports, LoopNet, wholesaler lists
+  homeharvest: {enabled: false}  # scraper, off by default
+  apify_zillow: {enabled: false} # scraper, off by default
+
+budgets:
+  rentcast:
+    plan: developer              # which row of rentcast_plans you are on
+    monthly_request_cap: 50      # hard stop: no request is sent past this (null = no cap)
+    billing_cycle_day: 1         # day of the month your RentCast plan renews
+
+rentcast_plans:                  # used only to price a run in --dry-run
+  developer: {monthly_fee: 0, included: 50, overage: 0.20}
+  foundation: {monthly_fee: 74, included: 1000, overage: 0.06}
+  growth: {monthly_fee: 199, included: 5000, overage: 0.03}
+  scale: {monthly_fee: 449, included: 25000, overage: 0.015}
+
+sweep:
+  page_size: 500                 # RentCast's maximum; every page is one billed request
+  filter_by_max_price: true      # ask only for listings at or under the buy box price
+  daily_days_old: 2              # daily sweep: listings that came on in the last N days
+  page_cache_hours: 12           # a repeat run within this window rereads pages from disk for free
+  completeness_tolerance: 0.02   # weekly: a state counts as fully fetched within this share of
+                                 # the reported total; only then are missing listings marked off-market
+  missed_sweeps_before_off_market: 1   # full sweeps in a row a listing must be missing from;
+                                 # 2 guards against a listing skipped while results reshuffle
+
+dedupe:
+  radius_m: 30                   # same property if this close and...
+  price_tolerance: 0.05          # ...priced within this share of each other
+
 financing:
   loan_limit_year: 2026          # picks config/loan_limits/<year>.yaml
   base_rate_manual: null         # your own base rate, used instead of the 30-year average

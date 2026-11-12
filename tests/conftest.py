@@ -126,3 +126,30 @@ def _clean_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
+
+
+# ---- database ----------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def _database_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One migrated, empty database, copied for each test that needs one."""
+    from dealfinder.store.db import open_database
+
+    path = tmp_path_factory.mktemp("db") / "template.db"
+    open_database(f"sqlite:///{path}").dispose()
+    return path
+
+
+@pytest.fixture
+def engine(_database_template: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A fresh migrated database, also wired up as the command line's database."""
+    from dealfinder.store.db import make_engine
+
+    path = tmp_path / "data" / "dealfinder.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_database_template, path)
+    monkeypatch.setenv("DEALFINDER_DB_URL", f"sqlite:///{path}")
+    database = make_engine(f"sqlite:///{path}")
+    yield database
+    database.dispose()

@@ -278,3 +278,183 @@ class TestAnalyzeWithMarketData:
         )
         assert result.exit_code == 0, result.output
         assert "offline and nothing is cached yet" in result.output
+
+
+class TestSweepCommands:
+    def online(self, monkeypatch, http_mock, records_by_state):
+        from test_rentcast_sweep import serve
+
+        monkeypatch.delenv("DEALFINDER_OFFLINE")
+        monkeypatch.setenv("RENTCAST_API_KEY", "rc-key")
+        return serve(http_mock, records_by_state)
+
+    def test_dry_run_needs_no_key_and_sends_nothing(self, engine):
+        result = runner.invoke(
+            app, ["sweep", "--mode", "weekly", "--states", "OH,in", "--dry-run"], env=WIDE
+        )
+        assert result.exit_code == 0, result.output
+        for expected in (
+            "Dry run: weekly sweep of 2 states for fourplex. Nothing was fetched.",
+            "no count yet: at least one request",
+            "This run: at least 2 billed requests.",
+            "Budget: 0 of 50 used this billing period, 50 left. The run fits.",
+            "developer   $0.00 a month",
+            "growth      $199.00 a month",
+        ):
+            assert expected in result.output, expected
+
+    def test_dry_run_of_every_state_shows_it_will_not_fit_a_daily_budget(self, engine):
+        result = runner.invoke(app, ["sweep", "--mode", "daily", "--dry-run"], env=WIDE)
+        assert result.exit_code == 0, result.output
+        assert "daily sweep of 49 states" in result.output
+        assert "about 1,490 requests" in result.output
+        assert "developer   $288.00 a month" in result.output  # 1,440 over the free 50 at $0.20
+
+    def test_a_real_sweep_without_a_key_explains_itself(self, engine):
+        result = runner.invoke(app, ["sweep", "--mode", "weekly", "--states", "OH"])
+        assert result.exit_code == 2
+        assert "RENTCAST_API_KEY is not set" in result.output
+        assert "--dry-run" in result.output
+
+    @pytest.mark.parametrize(
+        ("arguments", "message"),
+        [
+            (["sweep", "--mode", "monthly"], "Use daily or weekly"),
+            (["sweep", "--mode", "weekly", "--states", "OH,AK"], "AK not covered"),
+        ],
+    )
+    def test_bad_arguments(self, engine, arguments, message):
+        result = runner.invoke(app, arguments)
+        assert result.exit_code == 2
+        assert message in result.output
+
+    def test_sweep_then_listings_then_usage(self, engine, http_mock, monkeypatch):
+        from factories import rentcast_record
+
+        self.online(monkeypatch, http_mock, {"OH": [rentcast_record(n) for n in (1, 2, 3)]})
+        swept = runner.invoke(app, ["sweep", "--mode", "weekly", "--states", "OH"], env=WIDE)
+        assert swept.exit_code == 0, swept.output
+        assert "Run 1: weekly sweep, completed" in swept.output
+        assert "Requests billed now: 1. This billing period: 1 of 50." in swept.output
+        assert "Listings seen 3; new 3" in swept.output
+
+        listed = runner.invoke(app, ["listings", "--state", "oh"], env=WIDE)
+        assert listed.exit_code == 0, listed.output
+        assert "101 Sample St, Columbus, OH, 43215" in listed.output
+        assert "$401,000" in listed.output and "multifamily 2 4" in listed.output
+
+        usage = runner.invoke(app, ["usage"], env=WIDE)
+        assert usage.exit_code == 0, usage.output
+        assert "1 of 50 requests used" in usage.output and "49 left" in usage.output
+        assert "weekly" in usage.output and "completed" in usage.output
+
+        # With a count on hand, the next dry run knows the price exactly.
+        plan = runner.invoke(
+            app, ["sweep", "--mode", "weekly", "--states", "OH", "--dry-run"], env=WIDE
+        )
+        assert "This run: 1 billed requests." in plan.output
+        assert "3 listings last counted" in plan.output
+
+    def test_the_cap_from_settings_stops_the_sweep(
+        self, engine, http_mock, monkeypatch, config_dir
+    ):
+        from factories import rentcast_record
+
+        (config_dir / "settings.local.yaml").write_text(
+            "budgets: {rentcast: {monthly_request_cap: 1}}\nsweep: {page_size: 2}\n"
+        )
+        monkeypatch.setenv("DEALFINDER_CONFIG_DIR", str(config_dir))
+        route = self.online(monkeypatch, http_mock, {"OH": [rentcast_record(n) for n in range(5)]})
+        result = runner.invoke(app, ["sweep", "--mode", "weekly", "--states", "OH"], env=WIDE)
+        assert result.exit_code == 0, result.output
+        assert "stopped budget" in result.output
+        assert "1 of 1 requests used" in result.output
+        assert route.call_count == 1
+
+    def test_an_outage_exits_nonzero_for_the_scheduler(self, engine, http_mock, monkeypatch):
+        import httpx
+
+        from dealfinder import http as http_module
+        from dealfinder.adapters.rentcast import LISTINGS_URL
+
+        monkeypatch.delenv("DEALFINDER_OFFLINE")
+        monkeypatch.setenv("RENTCAST_API_KEY", "rc-key")
+        monkeypatch.setattr(http_module.time, "sleep", lambda seconds: None)
+        http_mock.get(LISTINGS_URL).mock(return_value=httpx.Response(503))
+        result = runner.invoke(app, ["sweep", "--mode", "weekly", "--states", "OH"], env=WIDE)
+        assert result.exit_code == 1
+        assert "failed" in result.output and "HTTP 503" in result.output
+
+    def test_probe(self, engine, http_mock, monkeypatch):
+        from factories import rentcast_record
+
+        self.online(monkeypatch, http_mock, {"OH": [rentcast_record(1)], "IN": []})
+        dry = runner.invoke(app, ["probe", "--states", "OH,IN", "--dry-run"], env=WIDE)
+        assert "probe sweep of 2 states" in dry.output and "first page only" in dry.output
+        result = runner.invoke(app, ["probe", "--states", "OH,IN"], env=WIDE)
+        assert result.exit_code == 0, result.output
+        assert "Run 1: probe sweep, completed" in result.output
+        assert "Requests billed now: 2." in result.output
+
+    def test_rentcast_can_be_switched_off(self, engine, monkeypatch, config_dir):
+        (config_dir / "settings.local.yaml").write_text("sources: {rentcast: {enabled: false}}\n")
+        monkeypatch.setenv("DEALFINDER_CONFIG_DIR", str(config_dir))
+        result = runner.invoke(app, ["sweep", "--mode", "weekly", "--dry-run"])
+        assert result.exit_code == 2
+        assert "switched off in settings" in result.output
+
+    def test_listings_on_an_empty_database(self, engine):
+        result = runner.invoke(app, ["listings"])
+        assert result.exit_code == 0
+        assert "No listings stored yet" in result.output
+
+
+class TestImportCommand:
+    @pytest.fixture
+    def csv_file(self, tmp_path):
+        from test_csv_import import MLS_FILE
+
+        path = tmp_path / "export.csv"
+        path.write_text(MLS_FILE, encoding="utf-8")
+        return path
+
+    @pytest.fixture(autouse=True)
+    def own_config(self, config_dir, monkeypatch):
+        monkeypatch.setenv("DEALFINDER_CONFIG_DIR", str(config_dir))
+        return config_dir
+
+    def test_import_then_list(self, engine, csv_file, own_config):
+        result = runner.invoke(app, ["import-csv", str(csv_file), "--mapping", "my_mls"], env=WIDE)
+        assert result.exit_code == 0, result.output
+        assert "Imported 3 of 5 rows" in result.output
+        assert "Mapping 'my_mls' (guessed now)" in result.output
+        assert "address_line1: Address" in result.output
+        assert "row 5 skipped: no street address" in result.output
+        assert (own_config / "csv_mappings" / "my_mls.yaml").is_file()
+
+        listed = runner.invoke(app, ["listings", "--status", "all"], env=WIDE)
+        assert "101 Sample St" in listed.output and "fourplex" in listed.output
+        assert "csv:my_mls" in listed.output
+
+        again = runner.invoke(app, ["import-csv", str(csv_file), "--mapping", "my_mls"], env=WIDE)
+        assert "Mapping 'my_mls' (saved)" in again.output
+        assert "New listings 0; updated 3" in again.output
+
+    def test_dry_run(self, engine, csv_file, own_config):
+        result = runner.invoke(
+            app, ["import-csv", str(csv_file), "--mapping", "my_mls", "--dry-run"], env=WIDE
+        )
+        assert result.exit_code == 0, result.output
+        assert "Would import 3 of 5 rows" in result.output
+        assert not (own_config / "csv_mappings" / "my_mls.yaml").exists()
+
+    def test_missing_file(self, engine, tmp_path):
+        result = runner.invoke(app, ["import-csv", str(tmp_path / "nope.csv"), "--mapping", "x"])
+        assert result.exit_code == 2
+        assert "No such file" in result.output
+
+    def test_csv_import_can_be_switched_off(self, engine, csv_file, own_config):
+        (own_config / "settings.local.yaml").write_text("sources: {csv: {enabled: false}}\n")
+        result = runner.invoke(app, ["import-csv", str(csv_file), "--mapping", "x"])
+        assert result.exit_code == 2
+        assert "switched off in settings" in result.output

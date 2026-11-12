@@ -15,8 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -50,6 +50,7 @@ class Fetched:
     fetched_at: datetime
     from_cache: bool
     stale: bool  # an expired cached copy served because the refresh failed or we are offline
+    headers: dict[str, str] = field(default_factory=dict)  # only the ones asked for
 
     def text(self) -> str:
         return self.body.decode("utf-8-sig", errors="replace")
@@ -112,17 +113,29 @@ class Fetcher:
                 fetched_at=datetime.fromisoformat(meta["fetched_at"]),
                 from_cache=True,
                 stale=False,
+                headers=dict(meta.get("headers", {})),
             )
         except (OSError, ValueError, KeyError):
             return None  # missing or damaged entry: treat as not cached
 
     def _write(
-        self, source: str, key: str, url: str, params: Mapping[str, str] | None, body: bytes
+        self,
+        source: str,
+        key: str,
+        url: str,
+        params: Mapping[str, str] | None,
+        body: bytes,
+        headers: Mapping[str, str],
     ) -> datetime:
         body_path, meta_path = self._paths(source, key)
         body_path.parent.mkdir(parents=True, exist_ok=True)
         fetched_at = self._now()
-        meta = {"url": url, "params": dict(params or {}), "fetched_at": fetched_at.isoformat()}
+        meta = {
+            "url": url,
+            "params": dict(params or {}),
+            "fetched_at": fetched_at.isoformat(),
+            "headers": dict(headers),
+        }
         for path, data in ((body_path, body), (meta_path, json.dumps(meta).encode())):
             temporary = path.with_suffix(path.suffix + ".tmp")
             temporary.write_bytes(data)
@@ -141,7 +154,7 @@ class Fetcher:
 
     def _request_once(
         self, source: str, url: str, params: Mapping[str, str], headers: Mapping[str, str] | None
-    ) -> bytes:
+    ) -> httpx.Response:
         self._pace(urlsplit(url).netloc)
         try:
             response = self._client.get(url, params=dict(params), headers=dict(headers or {}))
@@ -149,7 +162,7 @@ class Fetcher:
             raise _Retryable(f"network error ({type(error).__name__})") from error
         status = response.status_code
         if status == 200:
-            return response.content
+            return response
         if status == 429 or status >= 500:
             retry_after = response.headers.get("Retry-After", "")
             if retry_after.isdigit():
@@ -164,7 +177,7 @@ class Fetcher:
 
     def _download(
         self, source: str, url: str, params: Mapping[str, str], headers: Mapping[str, str] | None
-    ) -> bytes:
+    ) -> httpx.Response:
         retrying = Retrying(
             stop=stop_after_attempt(self._attempts),
             wait=wait_exponential_jitter(initial=1, max=20),
@@ -192,6 +205,8 @@ class Fetcher:
         max_age: timedelta | None = None,
         validate: Callable[[bytes], object] | None = None,
         refresh: bool = False,
+        before_send: Callable[[], object] | None = None,
+        keep_headers: Sequence[str] = (),
     ) -> Fetched:
         """GET with the cache in front.
 
@@ -199,6 +214,10 @@ class Fetcher:
         ``headers`` are sent but never stored. ``max_age`` None means a cached copy never
         expires. ``validate`` may raise SourceUnavailable to reject a body (an error page, the
         wrong shape) before it is cached. ``refresh`` skips a fresh cached copy.
+
+        ``before_send`` runs only when a real request is about to go out, never for a cache
+        hit. A budget guard uses it to refuse a metered request; whatever it raises propagates.
+        ``keep_headers`` names response headers to keep with the cached copy.
         """
         key = self._key(url, params)
         cached = self._read(source, key)
@@ -210,16 +229,24 @@ class Fetcher:
             if cached is not None:
                 return replace(cached, stale=True)
             raise SourceUnavailable(source, "offline and nothing is cached yet")
+        if before_send is not None:
+            before_send()
         try:
-            body = self._download(source, url, {**(params or {}), **(secret_params or {})}, headers)
+            response = self._download(
+                source, url, {**(params or {}), **(secret_params or {})}, headers
+            )
+            body = response.content
             if validate is not None:
                 validate(body)
         except SourceUnavailable:
             if cached is not None:
                 return replace(cached, stale=True)
             raise
-        fetched_at = self._write(source, key, url, params, body)
-        return Fetched(body=body, fetched_at=fetched_at, from_cache=False, stale=False)
+        kept = {name: response.headers[name] for name in keep_headers if name in response.headers}
+        fetched_at = self._write(source, key, url, params, body, kept)
+        return Fetched(
+            body=body, fetched_at=fetched_at, from_cache=False, stale=False, headers=kept
+        )
 
     def close(self) -> None:
         self._client.close()

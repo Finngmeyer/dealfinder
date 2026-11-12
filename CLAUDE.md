@@ -5,21 +5,24 @@ Local-first Python app that finds small multifamily listings (fourplexes by defa
 
 ## Current phase
 
-**Phases 1 and 2 are built.** Next is Phase 3. Each phase ends with passing tests, a demo
+**Phases 1 to 3 are built.** Next is Phase 4. Each phase ends with passing tests, a demo
 command and a commit. The standing rule is to stop for the owner's OK after each phase; on
 November 12 the owner said to keep working through the phases while they were away.
 
-Phase 2 still needs a live check of the two sources that need keys (HUD rents, Census ACS)
-once the owner supplies `HUD_API_TOKEN` and `CENSUS_API_KEY`. They are built from the published
-formats and tested against mocks only. FRED, Zillow and FEMA were run live.
+Not yet checked against the live services, because they need the owner's keys: HUD rents
+(`HUD_API_TOKEN`), Census ACS (`CENSUS_API_KEY`) and RentCast (`RENTCAST_API_KEY`). All three
+are built from the published formats and tested against mocks only. FRED, Zillow and FEMA were
+run live. First thing to do with a RentCast key: `dealfinder sweep --mode weekly --states OH`
+(a state-only query, which the docs describe but which has not been tried), then check a few
+stored rows against `raw_json`.
 
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Plan | approved |
 | 1 | Underwriting engine, financing presets, `analyze` CLI, golden test, no network | built |
 | 2 | FRED, HUD FMR/SAFMR, ACS, ZORI, FEMA NRI clients with disk cache; `market --zip` | built; HUD and ACS unverified live |
-| 3 | RentCast adapter, SQLite + Alembic, dedupe, budget guard, `--dry-run`, CSV import, inventory probe | next |
-| 4 | Property-record step for unit counts, text classifier, type toggles, optional LLM extraction | |
+| 3 | RentCast adapter, SQLite + Alembic, dedupe, budget guard, `--dry-run`, CSV import, inventory probe | built; RentCast unverified live |
+| 4 | Property-record step for unit counts, text classifier, type toggles, optional LLM extraction | next |
 | 5 | Stage-2 enrichment, scoring, buy box, Streamlit dashboard | |
 | 6 | Scheduler, alerts, exports, optional scraper adapters, README | |
 
@@ -32,9 +35,19 @@ uv run ruff check . && uv run ruff format .
 uv run dealfinder analyze --price 480000 --rents 1350x4 --zip 43215 --beds 2x4   # one deal
 uv run dealfinder market --zip 43215      # rents, taxes, vacancy, rates, hazard, loan limits
 uv run dealfinder settings                # settings in effect, files, which keys are set
+uv run dealfinder sweep --mode weekly --states OH --dry-run   # expected requests and cost
+uv run dealfinder sweep --mode weekly --states OH             # fetch, within the request cap
+uv run dealfinder probe --states OH,IN    # one request per state: count the inventory
+uv run dealfinder import-csv examples/sample_mls_export.csv --mapping sample
+uv run dealfinder listings --status all   # what is stored
+uv run dealfinder usage                   # request budget and recent runs
 uv run python scripts/build_zip_county.py        # rebuild the bundled ZIP-to-county data
 uv run python scripts/build_loan_limits.py 2027  # county loan limits for a new year (add 2027.yaml first)
 ```
+
+Schema change: edit `store/tables.py`, run `uv run alembic revision --autogenerate -m "..."`,
+then in the new file replace `dealfinder.store.tables.UtcDateTime()` with `sa.DateTime()`.
+The app upgrades its database on start.
 
 `analyze` and `market` read market data from `data/cache` and the network. `--offline` uses the
 cache only, `analyze --no-market` skips market data, `market --refresh` downloads again.
@@ -51,10 +64,10 @@ uv run dealfinder analyze --price 480000 --rents 1350x4 --zip 43215 --year-built
 ## Stack
 
 Python 3.12, uv, ruff, pytest (HTTP mocked with respx). pydantic v2 + pydantic-settings,
-PyYAML, Typer + rich, httpx + tenacity with an on-disk cache. Added in the phase that first
-needs them: SQLAlchemy 2 + Alembic on SQLite, pandas (3), Anthropic SDK with model
-`claude-haiku-5-5` for optional listing text extraction (4), Streamlit + pydeck + plotly (5),
-cron or the OS scheduler (6).
+PyYAML, Typer + rich, httpx + tenacity with an on-disk cache, SQLAlchemy 2 + Alembic on SQLite
+(nothing SQLite-specific, so Postgres works). Added in the phase that first needs them:
+Anthropic SDK with model `claude-haiku-5-5` for optional listing text extraction (4), pandas,
+Streamlit + pydeck + plotly (5), cron or the OS scheduler (6).
 
 ## Layout
 
@@ -67,6 +80,10 @@ config/insurance_by_state.csv   placeholder $/unit/year
 config/utility_allowance.csv    placeholder $/month by bedrooms, netted off HUD rents
 src/dealfinder/underwrite/      engine: pure functions over frozen pydantic inputs, no I/O
 src/dealfinder/http.py          Fetcher: every request goes through it (cache, retries, pacing)
+src/dealfinder/models.py        canonical Listing and the ListingSource interface
+src/dealfinder/adapters/        listing sources: rentcast.py, csv_import.py
+src/dealfinder/store/           tables.py, db.py, migrations/, repo.py, dedupe.py, usage.py
+src/dealfinder/pipeline/        sweep.py (plan, run, resume, probe), importer.py
 src/dealfinder/market/          one module per free source, plus context.py (all of them for a ZIP)
 src/dealfinder/analysis.py      builds engine inputs from a request + market data + settings
 src/dealfinder/settings.py      loads config; Environment holds secrets and paths
@@ -74,7 +91,9 @@ src/dealfinder/geo.py           ZIP to county and state from bundled Census data
 src/dealfinder/render.py        terminal output
 src/dealfinder/cli.py           Typer app
 src/dealfinder/data/            bundled Census reference data (built by scripts/)
-tests/                          HTTP is always mocked; fixtures are synthetic
+config/csv_mappings/            saved column mappings for CSV imports
+examples/sample_mls_export.csv  made-up listings to try the import with
+tests/                          HTTP is always mocked; fixtures and factories are synthetic
 data/                           runtime: database, cache, imports, labeled text (git-ignored)
 ```
 
@@ -100,6 +119,15 @@ data/                           runtime: database, cache, imports, labeled text 
   paces requests per host, falls back to a stale copy when a refresh fails, and never writes a
   key to disk: pass keys as `secret_params` or headers. A source problem raises
   `SourceUnavailable` with a reason a person can act on; nothing else should escape a source.
+- **Metered requests pass the budget guard.** `BudgetGuard.check` runs as the fetcher's
+  `before_send`, so it fires only for a real request, and `record` follows each billed one in
+  its own transaction. Cached pages are free and uncounted. The cap is
+  `budgets.rentcast.monthly_request_cap`, counted from `billing_cycle_day`.
+- **Sweeps are idempotent and resumable.** One transaction per page stores the listings and
+  the checkpoint together. `upsert_listing` only adds a price event when something changed.
+  Listings go off-market only after a complete weekly sweep of their state.
+- **Dedupe:** normalized address first, then within 30 m and 5% on price. Units are dropped
+  from the address key except for condos.
 - **Tests never touch the network.** An autouse fixture fails any request without a mocked
   route, and `DEALFINDER_OFFLINE=1` is set for every test. Fixtures are synthetic.
 - **No real data in git.** No API responses, listing text, MLS remarks or personal buy-box

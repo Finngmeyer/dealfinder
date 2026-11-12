@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from rich import box
 from rich.console import Console
 from rich.table import Table
 
 from dealfinder.analysis import AnalysisResult, AnalyzeRequest, InputLine, base_rate
 from dealfinder.market.context import MarketContext
+from dealfinder.pipeline.sweep import SweepPlan
 from dealfinder.settings import Config
+from dealfinder.store.tables import ListingRow, RunRow
+from dealfinder.store.usage import BudgetGuard
+from dealfinder.text import short_date
 from dealfinder.underwrite import ScenarioResult
 
 NOT_AVAILABLE = "n/a"
@@ -394,6 +400,100 @@ def render_market(market: MarketContext, config: Config, console: Console) -> No
         console.print("County not in the limit table: national minimums shown.", style="yellow")
 
     _closing_lines(market.attributions, "Estimates only. Verify before you rely on them.", console)
+
+
+def render_plan(plan: SweepPlan, console: Console) -> None:
+    """What a sweep would cost, with nothing fetched."""
+    console.print(
+        f"[bold]Dry run[/bold]: {plan.mode} sweep of {len(plan.rows)} "
+        f"{'state' if len(plan.rows) == 1 else 'states'} for {', '.join(plan.types)}. "
+        "Nothing was fetched."
+    )
+    table = _table("State", "Requests", "Basis", numeric_from=99)
+    table.columns[1].justify = "right"
+    for row in plan.rows:
+        table.add_row(row.state, f"{row.calls}{'' if row.known else '+'}", row.note)
+    console.print(table)
+    at_least = "" if plan.all_known else "at least "
+    console.print(f"This run: {at_least}{plan.calls} billed requests.")
+    if plan.remaining is None:
+        console.print(f"Budget: {plan.budget_used} used this billing period, no cap set.")
+    else:
+        fits = plan.states_that_fit()
+        verdict = (
+            "The run fits."
+            if fits == len(plan.rows)
+            else f"The run would stop after {fits} of {len(plan.rows)} states and resume next "
+            "period or when the cap is raised."
+        )
+        console.print(
+            f"Budget: {plan.budget_used} of {plan.budget_cap} used this billing period, "
+            f"{plan.remaining} left. {verdict}",
+            style=None if fits == len(plan.rows) else "yellow",
+        )
+    if plan.monthly_calls:
+        console.print(
+            f"Run {plan.mode} for a month: about {plan.monthly_calls:,.0f} requests"
+            f"{'' if plan.all_known else ' or more'}, which would cost:"
+        )
+        for name, cost in plan.monthly_cost.items():
+            console.print(f"  {name:<11} {money(cost, cents=True)} a month")
+
+
+def render_usage(
+    guard: BudgetGuard, config: Config, runs: Sequence[RunRow], console: Console
+) -> None:
+    budget = config.settings.budgets.rentcast
+    used = guard.used()
+    cap = "no cap" if guard.cap is None else str(guard.cap)
+    console.print(
+        f"[bold]RentCast[/bold] ({budget.plan} plan): {used} of {cap} requests used since "
+        f"{short_date(guard.period_start().date())}"
+        + ("" if guard.cap is None else f", {max(0, guard.cap - used)} left")
+    )
+    if not runs:
+        console.print("No runs yet.", style="dim")
+        return
+    table = _table("Run", "Mode", "Status", "Started", "Billed", "New listings", numeric_from=4)
+    for run in runs:
+        stats = run.stats or {}
+        new = sum(scope.get("new_listings", 0) for scope in stats.get("scopes", [])) or stats.get(
+            "new_listings", 0
+        )
+        table.add_row(
+            str(run.id),
+            run.mode,
+            run.status.replace("_", " "),
+            f"{run.started_at:%b %d %H:%M}",
+            str(stats.get("requests", 0)),
+            str(new),
+        )
+    console.print(table)
+
+
+def render_listings(rows: Sequence[ListingRow], console: Console) -> None:
+    if not rows:
+        console.print("No listings stored yet. Run a sweep or import a CSV.", style="dim")
+        return
+    table = _table("Price", "Type", "Units", "Beds", "Baths", "Address", "Source", "Days")
+    for index in (1, 5, 6):
+        table.columns[index].justify = "left"
+    for row in rows:
+        place = row.property
+        address = ", ".join(
+            part for part in (place.address_line1, place.city, place.state, place.zip_code) if part
+        )
+        table.add_row(
+            money(row.price),
+            place.property_kind.replace("_", " "),
+            "?" if place.unit_count is None else str(place.unit_count),
+            "" if place.bedrooms is None else f"{place.bedrooms:g}",
+            "" if place.bathrooms is None else f"{place.bathrooms:g}",
+            address,
+            row.source,
+            "" if row.days_on_market is None else str(row.days_on_market),
+        )
+    console.print(table)
 
 
 def render_analysis(result: AnalysisResult, console: Console) -> None:

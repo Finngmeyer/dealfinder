@@ -1,0 +1,374 @@
+"""initial schema
+
+Revision ID: 0001
+Revises: none
+"""
+
+from __future__ import annotations
+
+import sqlalchemy as sa
+from alembic import op
+
+revision = "0001"
+down_revision = None
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "inventory",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("source", sa.String(length=40), nullable=False),
+        sa.Column("scope", sa.String(length=160), nullable=False),
+        sa.Column("total", sa.Integer(), nullable=False),
+        sa.Column("counted_at", sa.DateTime(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("source", "scope"),
+    )
+    op.create_table(
+        "market_data",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("geography", sa.String(length=8), nullable=False),
+        sa.Column("geography_id", sa.String(length=10), nullable=False),
+        sa.Column("payload", sa.JSON(), nullable=False),
+        sa.Column("fetched_at", sa.DateTime(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("geography", "geography_id"),
+    )
+    op.create_table(
+        "properties",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("address_key", sa.String(length=240), nullable=True),
+        sa.Column("address_line1", sa.String(length=200), nullable=True),
+        sa.Column("address_line2", sa.String(length=80), nullable=True),
+        sa.Column("city", sa.String(length=120), nullable=True),
+        sa.Column("state", sa.String(length=2), nullable=True),
+        sa.Column("zip_code", sa.String(length=5), nullable=True),
+        sa.Column("county_fips", sa.String(length=5), nullable=True),
+        sa.Column("latitude", sa.Double(), nullable=True),
+        sa.Column("longitude", sa.Double(), nullable=True),
+        sa.Column("geo_cell", sa.String(length=24), nullable=True),
+        sa.Column("property_kind", sa.String(length=24), nullable=False),
+        sa.Column("unit_count", sa.Integer(), nullable=True),
+        sa.Column("unit_confidence", sa.String(length=8), nullable=True),
+        sa.Column("bedrooms", sa.Double(), nullable=True),
+        sa.Column("bathrooms", sa.Double(), nullable=True),
+        sa.Column("building_sqft", sa.Double(), nullable=True),
+        sa.Column("lot_sqft", sa.Double(), nullable=True),
+        sa.Column("year_built", sa.Integer(), nullable=True),
+        sa.Column("starred", sa.Boolean(), nullable=False),
+        sa.Column("hidden", sa.Boolean(), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    with op.batch_alter_table("properties", schema=None) as batch_op:
+        batch_op.create_index(
+            batch_op.f("ix_properties_address_key"), ["address_key"], unique=False
+        )
+        batch_op.create_index(
+            batch_op.f("ix_properties_county_fips"), ["county_fips"], unique=False
+        )
+        batch_op.create_index(batch_op.f("ix_properties_geo_cell"), ["geo_cell"], unique=False)
+        batch_op.create_index(batch_op.f("ix_properties_state"), ["state"], unique=False)
+        batch_op.create_index(batch_op.f("ix_properties_zip_code"), ["zip_code"], unique=False)
+
+    op.create_table(
+        "runs",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("mode", sa.String(length=16), nullable=False),
+        sa.Column("status", sa.String(length=24), nullable=False),
+        sa.Column("started_at", sa.DateTime(), nullable=False),
+        sa.Column("finished_at", sa.DateTime(), nullable=True),
+        sa.Column("params", sa.JSON(), nullable=False),
+        sa.Column("stats", sa.JSON(), nullable=False),
+        sa.Column("report", sa.Text(), nullable=True),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_table(
+        "alerts",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("run_id", sa.Integer(), nullable=True),
+        sa.Column("property_id", sa.Integer(), nullable=False),
+        sa.Column("kind", sa.String(length=40), nullable=False),
+        sa.Column("dedupe_key", sa.String(length=200), nullable=False),
+        sa.Column("payload", sa.JSON(), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("sent_at", sa.DateTime(), nullable=True),
+        sa.Column("channel", sa.String(length=40), nullable=True),
+        sa.ForeignKeyConstraint(
+            ["property_id"],
+            ["properties.id"],
+        ),
+        sa.ForeignKeyConstraint(
+            ["run_id"],
+            ["runs.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("dedupe_key"),
+    )
+    with op.batch_alter_table("alerts", schema=None) as batch_op:
+        batch_op.create_index(batch_op.f("ix_alerts_property_id"), ["property_id"], unique=False)
+
+    op.create_table(
+        "api_usage",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("provider", sa.String(length=40), nullable=False),
+        sa.Column("endpoint", sa.String(length=120), nullable=False),
+        sa.Column("requested_at", sa.DateTime(), nullable=False),
+        sa.Column("billable", sa.Boolean(), nullable=False),
+        sa.Column("units", sa.Integer(), nullable=False),
+        sa.Column("run_id", sa.Integer(), nullable=True),
+        sa.ForeignKeyConstraint(
+            ["run_id"],
+            ["runs.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    with op.batch_alter_table("api_usage", schema=None) as batch_op:
+        batch_op.create_index(
+            "ix_api_usage_provider_time", ["provider", "requested_at"], unique=False
+        )
+
+    op.create_table(
+        "checkpoints",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("run_id", sa.Integer(), nullable=False),
+        sa.Column("source", sa.String(length=40), nullable=False),
+        sa.Column("scope", sa.String(length=160), nullable=False),
+        sa.Column("next_offset", sa.Integer(), nullable=False),
+        sa.Column("total", sa.Integer(), nullable=True),
+        sa.Column("fetched", sa.Integer(), nullable=False),
+        sa.Column("completed", sa.Boolean(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["run_id"],
+            ["runs.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("run_id", "source", "scope"),
+    )
+    with op.batch_alter_table("checkpoints", schema=None) as batch_op:
+        batch_op.create_index(batch_op.f("ix_checkpoints_run_id"), ["run_id"], unique=False)
+
+    op.create_table(
+        "classifications",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("property_id", sa.Integer(), nullable=False),
+        sa.Column("property_kind", sa.String(length=24), nullable=False),
+        sa.Column("unit_count", sa.Integer(), nullable=True),
+        sa.Column("confidence", sa.String(length=8), nullable=False),
+        sa.Column("signals", sa.JSON(), nullable=False),
+        sa.Column("flags", sa.JSON(), nullable=False),
+        sa.Column("method", sa.String(length=24), nullable=False),
+        sa.Column("version", sa.String(length=16), nullable=False),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["property_id"],
+            ["properties.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    with op.batch_alter_table("classifications", schema=None) as batch_op:
+        batch_op.create_index(
+            batch_op.f("ix_classifications_property_id"), ["property_id"], unique=False
+        )
+
+    op.create_table(
+        "listings",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("property_id", sa.Integer(), nullable=False),
+        sa.Column("source", sa.String(length=40), nullable=False),
+        sa.Column("source_listing_id", sa.String(length=240), nullable=False),
+        sa.Column("status", sa.String(length=16), nullable=False),
+        sa.Column("price", sa.Double(), nullable=True),
+        sa.Column("property_type_raw", sa.String(length=80), nullable=True),
+        sa.Column("unit_count_stated", sa.Integer(), nullable=True),
+        sa.Column("description", sa.Text(), nullable=True),
+        sa.Column("hoa_fee_month", sa.Double(), nullable=True),
+        sa.Column("tax_annual", sa.Double(), nullable=True),
+        sa.Column("listed_date", sa.Date(), nullable=True),
+        sa.Column("removed_date", sa.Date(), nullable=True),
+        sa.Column("days_on_market", sa.Integer(), nullable=True),
+        sa.Column("listing_type", sa.String(length=40), nullable=True),
+        sa.Column("mls_name", sa.String(length=120), nullable=True),
+        sa.Column("mls_number", sa.String(length=80), nullable=True),
+        sa.Column("agent_name", sa.String(length=160), nullable=True),
+        sa.Column("agent_phone", sa.String(length=40), nullable=True),
+        sa.Column("office_name", sa.String(length=160), nullable=True),
+        sa.Column("url", sa.String(length=500), nullable=True),
+        sa.Column("raw_json", sa.JSON(), nullable=False),
+        sa.Column("first_seen_at", sa.DateTime(), nullable=False),
+        sa.Column("last_seen_at", sa.DateTime(), nullable=False),
+        sa.Column("last_seen_run_id", sa.Integer(), nullable=True),
+        sa.Column("missed_sweeps", sa.Integer(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["last_seen_run_id"],
+            ["runs.id"],
+        ),
+        sa.ForeignKeyConstraint(
+            ["property_id"],
+            ["properties.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("source", "source_listing_id"),
+    )
+    with op.batch_alter_table("listings", schema=None) as batch_op:
+        batch_op.create_index(batch_op.f("ix_listings_property_id"), ["property_id"], unique=False)
+        batch_op.create_index(batch_op.f("ix_listings_status"), ["status"], unique=False)
+
+    op.create_table(
+        "overrides",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("property_id", sa.Integer(), nullable=False),
+        sa.Column("field", sa.String(length=60), nullable=False),
+        sa.Column("value", sa.JSON(), nullable=False),
+        sa.Column("note", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["property_id"],
+            ["properties.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("property_id", "field"),
+    )
+    with op.batch_alter_table("overrides", schema=None) as batch_op:
+        batch_op.create_index(batch_op.f("ix_overrides_property_id"), ["property_id"], unique=False)
+
+    op.create_table(
+        "units",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("property_id", sa.Integer(), nullable=False),
+        sa.Column("position", sa.Integer(), nullable=False),
+        sa.Column("beds", sa.Double(), nullable=True),
+        sa.Column("baths", sa.Double(), nullable=True),
+        sa.Column("sqft", sa.Double(), nullable=True),
+        sa.Column("in_place_rent", sa.Double(), nullable=True),
+        sa.Column("market_rent", sa.Double(), nullable=True),
+        sa.Column("market_rent_source", sa.String(length=160), nullable=True),
+        sa.Column("rent_low", sa.Double(), nullable=True),
+        sa.Column("rent_high", sa.Double(), nullable=True),
+        sa.Column("comps", sa.JSON(), nullable=False),
+        sa.Column("mix_confidence", sa.String(length=8), nullable=True),
+        sa.ForeignKeyConstraint(
+            ["property_id"],
+            ["properties.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("property_id", "position"),
+    )
+    with op.batch_alter_table("units", schema=None) as batch_op:
+        batch_op.create_index(batch_op.f("ix_units_property_id"), ["property_id"], unique=False)
+
+    op.create_table(
+        "price_events",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("listing_id", sa.Integer(), nullable=False),
+        sa.Column("observed_at", sa.DateTime(), nullable=False),
+        sa.Column("event", sa.String(length=24), nullable=False),
+        sa.Column("price", sa.Double(), nullable=True),
+        sa.Column("previous_price", sa.Double(), nullable=True),
+        sa.ForeignKeyConstraint(
+            ["listing_id"],
+            ["listings.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    with op.batch_alter_table("price_events", schema=None) as batch_op:
+        batch_op.create_index(
+            batch_op.f("ix_price_events_listing_id"), ["listing_id"], unique=False
+        )
+
+    op.create_table(
+        "underwriting",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("property_id", sa.Integer(), nullable=False),
+        sa.Column("listing_id", sa.Integer(), nullable=False),
+        sa.Column("scenario", sa.String(length=40), nullable=False),
+        sa.Column("stage", sa.Integer(), nullable=False),
+        sa.Column("engine_version", sa.String(length=16), nullable=False),
+        sa.Column("inputs", sa.JSON(), nullable=False),
+        sa.Column("results", sa.JSON(), nullable=False),
+        sa.Column("cash_flow_door_month", sa.Double(), nullable=True),
+        sa.Column("coc", sa.Double(), nullable=True),
+        sa.Column("dscr", sa.Double(), nullable=True),
+        sa.Column("cap_rate", sa.Double(), nullable=True),
+        sa.Column("mao", sa.Double(), nullable=True),
+        sa.Column("score", sa.Double(), nullable=True),
+        sa.Column("grade", sa.String(length=1), nullable=True),
+        sa.Column("in_buy_box", sa.Boolean(), nullable=True),
+        sa.Column("computed_at", sa.DateTime(), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["listing_id"],
+            ["listings.id"],
+        ),
+        sa.ForeignKeyConstraint(
+            ["property_id"],
+            ["properties.id"],
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("listing_id", "scenario"),
+    )
+    with op.batch_alter_table("underwriting", schema=None) as batch_op:
+        batch_op.create_index(
+            batch_op.f("ix_underwriting_listing_id"), ["listing_id"], unique=False
+        )
+        batch_op.create_index(
+            batch_op.f("ix_underwriting_property_id"), ["property_id"], unique=False
+        )
+        batch_op.create_index(
+            "ix_underwriting_rank", ["scenario", "cash_flow_door_month"], unique=False
+        )
+
+
+def downgrade() -> None:
+    with op.batch_alter_table("underwriting", schema=None) as batch_op:
+        batch_op.drop_index("ix_underwriting_rank")
+        batch_op.drop_index(batch_op.f("ix_underwriting_property_id"))
+        batch_op.drop_index(batch_op.f("ix_underwriting_listing_id"))
+
+    op.drop_table("underwriting")
+    with op.batch_alter_table("price_events", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_price_events_listing_id"))
+
+    op.drop_table("price_events")
+    with op.batch_alter_table("units", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_units_property_id"))
+
+    op.drop_table("units")
+    with op.batch_alter_table("overrides", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_overrides_property_id"))
+
+    op.drop_table("overrides")
+    with op.batch_alter_table("listings", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_listings_status"))
+        batch_op.drop_index(batch_op.f("ix_listings_property_id"))
+
+    op.drop_table("listings")
+    with op.batch_alter_table("classifications", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_classifications_property_id"))
+
+    op.drop_table("classifications")
+    with op.batch_alter_table("checkpoints", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_checkpoints_run_id"))
+
+    op.drop_table("checkpoints")
+    with op.batch_alter_table("api_usage", schema=None) as batch_op:
+        batch_op.drop_index("ix_api_usage_provider_time")
+
+    op.drop_table("api_usage")
+    with op.batch_alter_table("alerts", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_alerts_property_id"))
+
+    op.drop_table("alerts")
+    op.drop_table("runs")
+    with op.batch_alter_table("properties", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_properties_zip_code"))
+        batch_op.drop_index(batch_op.f("ix_properties_state"))
+        batch_op.drop_index(batch_op.f("ix_properties_geo_cell"))
+        batch_op.drop_index(batch_op.f("ix_properties_county_fips"))
+        batch_op.drop_index(batch_op.f("ix_properties_address_key"))
+
+    op.drop_table("properties")
+    op.drop_table("market_data")
+    op.drop_table("inventory")
