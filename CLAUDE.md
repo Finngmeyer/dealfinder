@@ -5,8 +5,10 @@ Local-first Python app that finds small multifamily listings (fourplexes by defa
 
 ## Current phase
 
-**Phases 1 to 5 are built.** Next is Phase 6. Each phase ends with passing tests, a demo
-command and a commit. The standing rule is to stop for the owner's OK after each phase; on
+**All six phases are built.** What remains needs the owner: keys to run the paid and keyed
+sources live, a real MLS export for the precision test, and a private GitHub repository to
+push to (this session cannot create one). Each phase ended with passing tests, a demo command
+and a commit. The standing rule was to stop for the owner's OK after each phase; on
 November 12 the owner said to keep working through the phases while they were away.
 
 Phase 4's bar of 95% fourplex precision on 50 real labeled descriptions is not met yet, only
@@ -30,7 +32,7 @@ stored rows against `raw_json`.
 | 3 | RentCast adapter, SQLite + Alembic, dedupe, budget guard, `--dry-run`, CSV import, inventory probe | built; RentCast unverified live |
 | 4 | Property-record step for unit counts, text classifier, type toggles, optional LLM extraction | built; real-data precision test waiting for the owner's export; Claude step unverified live |
 | 5 | Two-stage funnel, stage-2 enrichment, scoring, buy box, `report`, Streamlit dashboard, CSV/XLSX export | built; RentCast rent estimates unverified live |
-| 6 | Scheduler, alerts, exports, optional scraper adapters, README | |
+| 6 | Scheduler, alerts, exports, optional scraper adapters, README | built; alert channels and both scrapers unverified live |
 
 ## Commands
 
@@ -56,7 +58,12 @@ uv run dealfinder classify-eval data/labeled/descriptions.csv   # score the clas
 uv run dealfinder underwrite              # stage 1 on everything, stage 2 on survivors, then scores
 uv run dealfinder underwrite --stage1-only   # free data only
 uv run dealfinder report --top 20         # ranked by cash flow per door (--buy-box, --unverified, --problems)
+uv run dealfinder report --csv deals.csv --xlsx deals.xlsx   # the whole list as a spreadsheet
 uv run dealfinder ui                      # the dashboard (Streamlit), http://localhost:8501
+uv run dealfinder alerts                  # preview the digest; --send sends it once
+uv run dealfinder run --mode daily        # sweep, classify, underwrite, alert (what the scheduler runs)
+uv run dealfinder schedule                # show the cron lines / tasks; --install, --remove
+uv run dealfinder fetch --source homeharvest --dry-run   # optional scrapers, off by default
 uv run dealfinder usage                   # request budget and recent runs
 uv run python scripts/build_zip_county.py        # rebuild the bundled ZIP-to-county data
 uv run python scripts/build_loan_limits.py 2027  # county loan limits for a new year (add 2027.yaml first)
@@ -100,10 +107,14 @@ config/utility_allowance.csv    placeholder $/month by bedrooms, netted off HUD 
 src/dealfinder/underwrite/      engine: pure functions over frozen pydantic inputs, no I/O
 src/dealfinder/http.py          Fetcher: every request goes through it (cache, retries, pacing)
 src/dealfinder/models.py        canonical Listing and the ListingSource interface
-src/dealfinder/adapters/        listing sources: rentcast.py, csv_import.py
+src/dealfinder/adapters/        listing sources: rentcast.py, csv_import.py, and the optional
+                                scrapers homeharvest.py and apify_zillow.py (off by default)
+src/dealfinder/alerts.py        what is due, the digest, Discord / Slack / SMTP, never twice
+src/dealfinder/scheduler.py     crontab lines and Task Scheduler commands for `dealfinder run`
 src/dealfinder/store/           tables.py, db.py, migrations/, repo.py, dedupe.py, usage.py
 src/dealfinder/pipeline/        sweep.py (plan, run, resume, probe), importer.py, classify.py,
-                                underwrite.py (the funnel), report.py (read stored results back)
+                                underwrite.py (the funnel), report.py (read stored results back),
+                                ingest.py (store a scraper's results), run.py (everything in order)
 src/dealfinder/score.py         deal score 0-100, pure; weights and scales come from settings
 src/dealfinder/export.py        deals as CSV and XLSX
 src/dealfinder/ui/              Streamlit dashboard: app.py (entry), views.py (five pages),
@@ -193,6 +204,16 @@ data/                           runtime: database, cache, imports, labeled text 
   in the dashboard are HTML built by `ui/theme.py` (Streamlit's own table cannot italicise a
   cell or give it a tooltip). Everything from a listing is escaped with `theme.esc` first.
   Grades use one validated blue ramp; status colors always come with a word.
+- **Alerts go out once.** `alerts.find_alerts` works out what is due from the stored results;
+  only alerts that were actually sent count as "already told", so a failed send is retried
+  with the same key and a stale unsent row is dropped. A deal that leaves the buy box is
+  marked lapsed, which makes its return news again. Starred price cuts count from
+  `properties.starred_at`. A webhook address is a secret: `Fetcher.post_json` never puts a
+  URL in an error.
+- **Scrapers stop, they do not push.** Off by default, labeled in `source_label` and on the
+  Settings page. One request at a time with `scrapers.min_seconds_between_requests` between,
+  no proxy argument anywhere, and the first refusal raises `SourceUnavailable` and ends the
+  run. `ingest` never marks anything off the market on the strength of a scrape.
 - **Tests never touch the network.** An autouse fixture fails any request without a mocked
   route, and `DEALFINDER_OFFLINE=1` is set for every test. Fixtures are synthetic.
 - **No real data in git.** No API responses, listing text, MLS remarks or personal buy-box
@@ -214,8 +235,9 @@ data/                           runtime: database, cache, imports, labeled text 
 - Approved: one RentCast property-record request per screened listing for unit count and last
   tax bill; listings whose unit count cannot be confirmed go in a separate "unverified" list.
 - The owner will export 50 to 100 multifamily listings with remarks for the Phase 4 precision test.
-- Not decided yet: scraper adapters (suggested: decide after Phase 3), alert channel
-  (suggested: Discord webhook), real insurance quotes and rate quotes (none given).
+- Not decided yet: whether to switch a scraper on (both are built, both are off), alert
+  channel (all three are built; suggested: Discord webhook), real insurance quotes and rate
+  quotes (none given), and the laptop's operating system (the scheduler handles all three).
 
 ## Assumptions made where the spec was silent (owner has seen them)
 
@@ -308,5 +330,22 @@ data/                           runtime: database, cache, imports, labeled text 
   through its main town, using the Census county-subdivision file and Connecticut crosswalk.
 - **Zillow** also publishes a county ZORI file (`County_zori_uc_sfrcondomfr_sm_month.csv`,
   FIPS in `StateCodeFIPS` + `MunicipalCodeFIPS`), used when a ZIP has no index of its own.
+- **HomeHarvest** 0.8.18 (optional extra `scrapers`; needs pandas < 3, which is why pandas is
+  locked to 2.3): `scrape_property(location, listing_type, return_type="pandas",
+  property_type, past_days, price_max, limit, extra_property_data, parallel, proxy, ...)`.
+  The table has `property_id`, `status`, `text` (the description), `style` (MULTI_FAMILY,
+  DUPLEX_TRIPLEX, ...), `list_price`, `tax`, `full_baths`, `half_baths`, `days_on_mls`,
+  `fips_code`, coordinates and agent fields; gaps are NaN or NaT. Signature and columns were
+  read from the installed package; Realtor.com itself was never contacted.
+- **Apify** `maxcopell~zillow-scraper` ("Zillow Search Scraper"): input `searchUrls: [{url}]`
+  (the URL must contain `searchQueryState`), `extractionMethod`, `resultsLimit`; items have
+  `zpid`, `listingPrice.amount`, `listingAddress`, `coordinates`, `homeType`, `listingType`
+  flags, `bedrooms`, `bathrooms`, `livingArea`, `daysOnZillow`, `propertyUrl`, and no
+  description. $0.0023 a result on Apify's free tier (April 2026 pricing). Read from Apify's
+  public actor API; no run was made. The synchronous run endpoint is
+  `POST /v2/acts/{actor}/run-sync-get-dataset-items` with a bearer token.
+- **Claude Haiku 5.5** (`claude-haiku-5-5`): $0.10 in, $0.50 out per million tokens for
+  prompts up to 100K tokens (price list cached November 3, 2026); adaptive thinking is on by
+  default and effort defaults to medium, so the extractor sets `effort: low`.
 - This sandbox reaches the network through a proxy with its own CA; httpx honours
   `SSL_CERT_FILE` and `HTTPS_PROXY` from the environment, so no client changes are needed.
