@@ -292,8 +292,12 @@ def mark_off_market(
 # ---- runs, checkpoints, inventory ------------------------------------------------------------
 
 
-def start_run(session: Session, mode: str, params: dict[str, Any]) -> RunRow:
-    run = RunRow(mode=mode, status="running", params=params, stats={})
+def start_run(
+    session: Session, mode: str, params: dict[str, Any], *, started_at: datetime | None = None
+) -> RunRow:
+    run = RunRow(
+        mode=mode, status="running", params=params, stats={}, started_at=started_at or utcnow()
+    )
     session.add(run)
     session.flush()
     return run

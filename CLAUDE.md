@@ -5,7 +5,7 @@ Local-first Python app that finds small multifamily listings (fourplexes by defa
 
 ## Current phase
 
-**Phases 1 to 4 are built.** Next is Phase 5. Each phase ends with passing tests, a demo
+**Phases 1 to 5 are built.** Next is Phase 6. Each phase ends with passing tests, a demo
 command and a commit. The standing rule is to stop for the owner's OK after each phase; on
 November 12 the owner said to keep working through the phases while they were away.
 
@@ -29,7 +29,7 @@ stored rows against `raw_json`.
 | 2 | FRED, HUD FMR/SAFMR, ACS, ZORI, FEMA NRI clients with disk cache; `market --zip` | built; HUD and ACS unverified live |
 | 3 | RentCast adapter, SQLite + Alembic, dedupe, budget guard, `--dry-run`, CSV import, inventory probe | built; RentCast unverified live |
 | 4 | Property-record step for unit counts, text classifier, type toggles, optional LLM extraction | built; real-data precision test waiting for the owner's export; Claude step unverified live |
-| 5 | Stage-2 enrichment, scoring, buy box, Streamlit dashboard | |
+| 5 | Two-stage funnel, stage-2 enrichment, scoring, buy box, `report`, Streamlit dashboard, CSV/XLSX export | built; RentCast rent estimates unverified live |
 | 6 | Scheduler, alerts, exports, optional scraper adapters, README | |
 
 ## Commands
@@ -53,6 +53,10 @@ uv run dealfinder classify-all            # reclassify what changed (--llm: Clau
 uv run dealfinder resolve-units --dry-run # RentCast property records for unconfirmed unit counts
 uv run dealfinder label-sheet             # stored descriptions -> data/labeled/descriptions.csv
 uv run dealfinder classify-eval data/labeled/descriptions.csv   # score the classifier on labeled text
+uv run dealfinder underwrite              # stage 1 on everything, stage 2 on survivors, then scores
+uv run dealfinder underwrite --stage1-only   # free data only
+uv run dealfinder report --top 20         # ranked by cash flow per door (--buy-box, --unverified, --problems)
+uv run dealfinder ui                      # the dashboard (Streamlit), http://localhost:8501
 uv run dealfinder usage                   # request budget and recent runs
 uv run python scripts/build_zip_county.py        # rebuild the bundled ZIP-to-county data
 uv run python scripts/build_loan_limits.py 2027  # county loan limits for a new year (add 2027.yaml first)
@@ -98,10 +102,17 @@ src/dealfinder/http.py          Fetcher: every request goes through it (cache, r
 src/dealfinder/models.py        canonical Listing and the ListingSource interface
 src/dealfinder/adapters/        listing sources: rentcast.py, csv_import.py
 src/dealfinder/store/           tables.py, db.py, migrations/, repo.py, dedupe.py, usage.py
-src/dealfinder/pipeline/        sweep.py (plan, run, resume, probe), importer.py, classify.py
+src/dealfinder/pipeline/        sweep.py (plan, run, resume, probe), importer.py, classify.py,
+                                underwrite.py (the funnel), report.py (read stored results back)
+src/dealfinder/score.py         deal score 0-100, pure; weights and scales come from settings
+src/dealfinder/export.py        deals as CSV and XLSX
+src/dealfinder/ui/              Streamlit dashboard: app.py (entry), views.py (five pages),
+                                data.py (Streamlit-free reads and actions), theme.py (HTML, colors)
+src/dealfinder/store/overrides.py  the user's own figures per property
 src/dealfinder/classify/        patterns, classifier, unit_mix, rents, keywords, llm, evaluate
 config/keywords.yaml            phrases that tag a listing (as-is, cash only, motivated, ...)
-src/dealfinder/market/          one module per free source, plus context.py (all of them for a ZIP)
+src/dealfinder/market/          one module per free source, plus context.py (all of them for a ZIP);
+                                flood.py (FEMA flood zone at a point), geocode.py (Census geocoder)
 src/dealfinder/analysis.py      builds engine inputs from a request + market data + settings
 src/dealfinder/settings.py      loads config; Environment holds secrets and paths
 src/dealfinder/geo.py           ZIP to county and state from bundled Census data
@@ -162,6 +173,26 @@ data/                           runtime: database, cache, imports, labeled text 
   quote is not in the description or does not contain it. It fills gaps and never overrules
   a count the rules hold at medium or better. Each description is sent at most once
   (`method` becomes `rules+llm`), capped by `classify.llm.max_calls_per_run`.
+- **The funnel.** `run_funnel` underwrites one listing per property (the most recently seen
+  active one) for every wanted or possibly-wanted type. Stage 1: free data, the ranking
+  scenario only, kept when cash flow per door or rent-to-price clears `funnel.stage1`.
+  Stage 2: survivors inside the buy box's states and price, best cash flow first: property
+  record, Claude, geocode, flood, a rent estimate per unit layout, then every loan preset.
+  Each listing gets a `screens` row (stage, verdict, inputs with sources, flags, what stage 2
+  did) and one `underwriting` row per scenario. A listing that cannot be underwritten is
+  stored at stage 0 with the reason. Scores are computed last, against county medians of the
+  run's own results. Without HUD rents a listing with no stated rent cannot be screened and
+  nothing is spent on it: that is deliberate (no blind RentCast spending).
+- **Commit before a metered call.** The request counter writes on its own connection, and
+  SQLite allows one writer: `enrich` calls `session.commit()` before each RentCast request.
+- **Provenance travels with the request.** `AnalyzeRequest.provenance` names the source of
+  each figure that came from a listing or a lookup; anything without an entry reads as
+  entered by hand. The user's own figures (`overrides`) win over everything and show as
+  "your figure".
+- **Estimates are italic, actuals upright, sources on hover.** Tables of underwriting figures
+  in the dashboard are HTML built by `ui/theme.py` (Streamlit's own table cannot italicise a
+  cell or give it a tooltip). Everything from a listing is escaped with `theme.esc` first.
+  Grades use one validated blue ramp; status colors always come with a word.
 - **Tests never touch the network.** An autouse fixture fails any request without a mocked
   route, and `DEALFINDER_OFFLINE=1` is set for every test. Fixtures are synthetic.
 - **No real data in git.** No API responses, listing text, MLS remarks or personal buy-box
@@ -200,6 +231,19 @@ data/                           runtime: database, cache, imports, labeled text 
 - Unknown flood zone is flagged, not charged (`when_unknown.in_flood_zone: false`); unknown
   county hazard applies the 1.5x insurance multiplier. Both are settings.
 - Utility allowance and flood premium are config placeholders with no data source.
+- Score scales (all in `scoring`, so the owner can change them): cash flow earns nothing at
+  $0 and full marks at $300; CoC 0% to 12%; DSCR 1.00 to 1.50 (a cash purchase gets full
+  marks); cap rate 0 to 2 points above the county median; price per door 0% to 30% below it;
+  rent upside 0% to 20%. Seller motivation: up to 4 points for days on market (full at 120),
+  up to 4 for the total price cut (full at 10%), 2 for each motivated-seller tag or distress
+  listing type, capped at 10. A county needs 5 underwritten listings to have a median;
+  otherwise those two parts earn nothing. Unknown hazard counts as high (as it does for
+  insurance); an unchecked flood zone does not. The spec gave the weights and the full-marks
+  points; the zero points and the motivation split are assumptions the owner has not seen.
+- With no county tax rate loaded, a known last tax bill is used as the tax figure (flagged,
+  since a sale can trigger reassessment) in place of the 2.5% stand-in.
+- A deal is in the buy box when its type is confirmed, its state and price fit, and it meets
+  every target under the scenario shown. Unconfirmed unit counts are never in the buy box.
 - HUD rents are gross, so the utility allowance comes off unless the owner is known to pay
   utilities. Without bedroom counts no market rent is estimated, since a rent for the wrong
   size would be worse than none. Zillow's index is a cross-check only: rents more than 25%
@@ -238,8 +282,17 @@ data/                           runtime: database, cache, imports, labeled text 
   ZIP plus a `"zip_code": "MSA level"` row where Small Area FMRs apply. Values may be strings.
   Not built yet: the New England town lookup (the Census ZCTA-to-county-subdivision file gives
   ZIP to town) and HUD's ZIP crosswalk, both waiting for a token to test against.
-- **FEMA NFHL**: find the "Flood Hazard Zones" layer by name in `MapServer?f=json` (currently
-  28); point queries return `FLD_ZONE`, `ZONE_SUBTY`, `SFHA_TF`.
+- **FEMA NFHL** (`hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer`): find the
+  "Flood Hazard Zones" layer by name in `MapServer?f=json` (currently 28); point queries
+  return `FLD_ZONE`, `ZONE_SUBTY`, `SFHA_TF` ("T" inside a Special Flood Hazard Area). No
+  features means FEMA has no map there. Run live on November 12.
+- **Census geocoder** `geocoding.geo.census.gov/geocoder/locations/address` (keyless, params
+  `street, city, state, zip, benchmark=Public_AR_Current, format=json`): coordinates are in
+  `result.addressMatches[0].coordinates` (`x` longitude, `y` latitude); no match is an empty
+  list. Run live on November 12.
+- **Streamlit 1.67**: `st.dataframe` shows Styler colors but not italics, and
+  `Styler.set_tooltips` breaks the cells, hence the HTML tables. `AppTest.from_function` runs
+  a page headlessly (see `tests/test_ui.py`). The default page lives at `/`.
 - **FEMA NRI**: the old download page redirects and blocks scripts. Use the public ArcGIS
   service `services.arcgis.com/XG15cJAlne2vxtgt/.../National_Risk_Index_Counties/FeatureServer/0`
   (fields `STCOFIPS`, `RISK_SCORE`, `RISK_RATNG`; 3,232 rows; 2,000 per page).

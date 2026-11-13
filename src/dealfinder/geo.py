@@ -104,6 +104,12 @@ def _tables() -> tuple[dict[str, str], dict[str, tuple[str, str]], dict[str, str
     return zip_to_county, counties, prefix_to_state
 
 
+def county_name(county_fips: str | None) -> str | None:
+    """'Franklin County, OH' for a 5-digit county code; None when it is not in the table."""
+    found = _tables()[1].get(county_fips or "")
+    return f"{found[1]}, {found[0]}" if found else None
+
+
 def normalize_zip(value: str) -> str | None:
     """Five-digit ZIP from '43215' or '43215-1234'; None when it is not a ZIP."""
     match = _ZIP.match(value)

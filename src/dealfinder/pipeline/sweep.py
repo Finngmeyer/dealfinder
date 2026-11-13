@@ -227,7 +227,7 @@ def run_sweep(
         run = None if fresh else repo.resumable_run(session, mode, params)
         resumed = run is not None
         if run is None:
-            run = repo.start_run(session, mode, params)
+            run = repo.start_run(session, mode, params, started_at=now())
         run.status = "running"
         run_id = run.id
         started = run.started_at

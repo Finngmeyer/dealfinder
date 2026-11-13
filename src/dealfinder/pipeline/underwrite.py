@@ -667,6 +667,118 @@ def enrich(
 # ---- the run -------------------------------------------------------------------------------------
 
 
+def _process(
+    session: Session,
+    listing: ListingRow,
+    match: str,
+    scenarios: list[str],
+    stage: int,
+    config: Config,
+    markets: MarketCache,
+    **extra: Any,
+) -> _Outcome:
+    """Underwrite one listing and store the result, or the reason it could not be."""
+    settings = config.settings
+    ranking = settings.buy_box.ranking_scenario
+    try:
+        result, tags = _underwrite(session, listing, match, config, markets, scenarios)
+    except Unscreenable as problem:
+        _store_problem(session, listing, match, str(problem))
+        return _Outcome(listing_id=listing.id, problem=str(problem))
+    kpis = next(s for s in result.scenarios if s.terms.name == ranking).kpis
+    passed, note = stage1_verdict(
+        kpis.cash_flow_door_month, kpis.rent_to_price, settings.funnel.stage1
+    )
+    _store_result(
+        session, listing, match, result, tags, config, stage=stage, passed=passed, note=note,
+        **extra,
+    )  # fmt: skip
+    place = listing.property
+    max_price = settings.buy_box.max_price
+    return _Outcome(
+        listing_id=listing.id,
+        county=place.county_fips,
+        cap_rate=kpis.cap_rate,
+        price_per_door=kpis.price_per_door,
+        cash_flow_door=kpis.cash_flow_door_month,
+        passed=passed,
+        eligible=passed
+        and (place.state is None or place.state in wanted_states(config))
+        and (max_price is None or (listing.price or 0) <= max_price),
+    )
+
+
+def _rescore(row: UnderwritingRow, config: Config, cap_median: Any, door_median: Any) -> str:
+    """Score one stored result against its county's medians. Returns the grade."""
+    inputs = ScoreInputs(
+        **{
+            **row.score_parts["inputs"],
+            "county_cap_rate": cap_median,
+            "county_price_per_door": door_median,
+        }
+    )
+    result = score(inputs, config.settings.scoring)
+    row.score, row.grade = result.total, result.grade
+    row.score_parts = {
+        "inputs": inputs.model_dump(mode="json"),
+        **result.model_dump(mode="json", exclude={"total", "grade"}),
+    }
+    return result.grade
+
+
+def underwrite_listing(
+    engine: Engine,
+    config: Config,
+    environment: Environment,
+    fetcher: Fetcher,
+    listing_id: int,
+    *,
+    markets: MarketCache | None = None,
+) -> str | None:
+    """Underwrite one stored listing again, under every loan preset, after its figures
+    changed. Nothing is fetched beyond market data, and the county medians from the last
+    full run are reused for the score. Returns the reason if it cannot be underwritten."""
+    settings = config.settings
+    ranking = settings.buy_box.ranking_scenario
+    presets = settings.financing.presets
+    every = [name for name, preset in presets.items() if preset.enabled or name == ranking]
+    box = settings.buy_box
+    with session_scope(engine) as session:
+        listing = session.get(ListingRow, listing_id)
+        if listing is None:
+            return "The listing is no longer stored."
+        place = listing.property
+        match = kind_matches(
+            place.property_kind, place.unit_confidence, box.property_types, box.min_unit_confidence
+        )
+        before = session.scalars(
+            select(UnderwritingRow).where(UnderwritingRow.listing_id == listing_id)
+        ).first()
+        medians = (None, None)
+        if before is not None and "inputs" in (before.score_parts or {}):
+            stored = before.score_parts["inputs"]
+            medians = (stored.get("county_cap_rate"), stored.get("county_price_per_door"))
+        screen = session.scalars(
+            select(ScreenRow).where(ScreenRow.listing_id == listing_id)
+        ).first()
+        stage = max(1, screen.stage) if screen is not None else 1
+        outcome = _process(
+            session,
+            listing,
+            match,
+            every,
+            stage,
+            config,
+            markets or MarketCache(config, environment, fetcher),
+        )
+        session.flush()
+        for row in session.scalars(
+            select(UnderwritingRow).where(UnderwritingRow.listing_id == listing_id)
+        ):
+            _rescore(row, config, *medians)
+        return outcome.problem
+
+
 class FunnelReport(BaseModel):
     candidates: int = 0
     underwritten: int = 0
@@ -745,36 +857,10 @@ def run_funnel(
             session.execute(delete(table).where(table.listing_id.not_in(keep)))
     report.candidates = len(chosen)
     matches = dict(chosen)
-    states = wanted_states(config)
-    max_price = settings.buy_box.max_price
 
     def one(session: Session, listing: ListingRow, scenarios: list[str], stage: int, **extra: Any):
-        match = matches[listing.id]
-        try:
-            result, tags = _underwrite(session, listing, match, config, markets, scenarios)
-        except Unscreenable as problem:
-            _store_problem(session, listing, match, str(problem))
-            return _Outcome(listing_id=listing.id, problem=str(problem))
-        ranked = next(s for s in result.scenarios if s.terms.name == ranking)
-        kpis = ranked.kpis
-        passed, note = stage1_verdict(
-            kpis.cash_flow_door_month, kpis.rent_to_price, settings.funnel.stage1
-        )
-        _store_result(
-            session, listing, match, result, tags, config, stage=stage, passed=passed, note=note,
-            **extra,
-        )  # fmt: skip
-        place = listing.property
-        return _Outcome(
-            listing_id=listing.id,
-            county=place.county_fips,
-            cap_rate=kpis.cap_rate,
-            price_per_door=kpis.price_per_door,
-            cash_flow_door=kpis.cash_flow_door_month,
-            passed=passed,
-            eligible=passed
-            and (place.state is None or place.state in states)
-            and (max_price is None or (listing.price or 0) <= max_price),
+        return _process(
+            session, listing, matches[listing.id], scenarios, stage, config, markets, **extra
         )
 
     load = (selectinload(ListingRow.property), selectinload(ListingRow.price_events))
@@ -865,24 +951,11 @@ def run_funnel(
             for row in session.scalars(
                 select(UnderwritingRow).where(UnderwritingRow.listing_id.in_(batch))
             ):
-                cap_median, door_median = medians.get(
-                    counties.get(row.listing_id) or "", (None, None)
+                grade = _rescore(
+                    row, config, *medians.get(counties.get(row.listing_id) or "", (None, None))
                 )
-                inputs = ScoreInputs(
-                    **{
-                        **row.score_parts["inputs"],
-                        "county_cap_rate": cap_median,
-                        "county_price_per_door": door_median,
-                    }
-                )
-                result = score(inputs, settings.scoring)
-                row.score, row.grade = result.total, result.grade
-                row.score_parts = {
-                    "inputs": inputs.model_dump(mode="json"),
-                    **result.model_dump(mode="json", exclude={"total", "grade"}),
-                }
                 if row.scenario == ranking:
-                    grades[result.grade] += 1
+                    grades[grade] += 1
                     report.in_buy_box += bool(row.in_buy_box)
     report.grades = dict(grades)
     return report

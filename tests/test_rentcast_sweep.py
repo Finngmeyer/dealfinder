@@ -89,7 +89,8 @@ def make_source(engine, config, fetcher, *, cap=50, key="rc-key", clock=None):
         sweep=config.settings.sweep,
         max_price=config.settings.buy_box.max_price,
         inventory=last_count,
-        today=lambda: date(2026, 11, 12),
+        # The source and the sweep must agree on what day it is.
+        today=(lambda: clock().date()) if clock else (lambda: date(2026, 11, 12)),
     )
     return source, guard
 

@@ -671,6 +671,31 @@ def report_command(
         )
 
 
+@app.command("ui")
+def ui_command(
+    port: Annotated[int, typer.Option(help="Port for the dashboard.")] = 8501,
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Do not open a browser window.")
+    ] = False,
+) -> None:
+    """Open the dashboard: ranked deals, map, one deal in full, markets and settings."""
+    import subprocess
+    import sys
+    from importlib.util import find_spec
+
+    if find_spec("streamlit") is None:
+        raise _fail("The dashboard needs Streamlit. Install it with: uv sync")
+    _load()  # fail early, in plain words, on a bad config or database
+    script = Path(__file__).parent / "ui" / "app.py"
+    command = [
+        sys.executable, "-m", "streamlit", "run", str(script),
+        "--server.port", str(port),
+        "--browser.gatherUsageStats", "false",
+        "--server.headless", "true" if no_browser else "false",
+    ]  # fmt: skip
+    raise typer.Exit(code=subprocess.call(command))
+
+
 @app.command("usage")
 def usage_command() -> None:
     """Show what has been spent of the RentCast request budget, and recent runs."""
