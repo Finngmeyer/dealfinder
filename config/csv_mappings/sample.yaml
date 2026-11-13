@@ -1,0 +1,23 @@
+# Column mapping for CSV imports. Left side: the field. Right side: the column header
+# in your file. Fix anything guessed wrong; add a line under defaults for a value the
+# file leaves out, for example  state: OH
+source: sample
+columns:
+  source_listing_id: 'MLS #'
+  address_line1: Address
+  city: City
+  state: State
+  zip_code: Zip Code
+  price: List Price
+  unit_count: '# Units'
+  property_type_raw: Property Type
+  bedrooms: Total Bedrooms
+  bathrooms: Total Bathrooms
+  building_sqft: Living Area
+  year_built: Year Built
+  description: Public Remarks
+  tax_annual: Taxes
+  listed_date: List Date
+  days_on_market: DOM
+  status: Status
+defaults: {}
