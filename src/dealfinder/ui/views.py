@@ -53,18 +53,30 @@ def _html(*parts: str) -> None:
     st.html(theme.block(_mode(), *parts))
 
 
-def _scenario_picker(config: Config, key: str) -> str:
+RANKED = "Each deal's ranking loan"
+
+
+def _scenario_picker(config: Config, key: str) -> str | None:
+    """The loan to show deals under; None means each deal under the loan it is ranked by."""
     presets = config.settings.financing.presets
-    ranking = config.settings.buy_box.ranking_scenario
-    names = [name for name, preset in presets.items() if preset.enabled or name == ranking]
+    box = config.settings.buy_box
+    ranking = (box.ranking_scenario, box.ranking_scenario_5plus)
+    names: list[str | None] = [None]
+    names += [name for name, preset in presets.items() if preset.enabled or name in ranking]
     return st.sidebar.selectbox(
         "Loan scenario",
         names,
-        index=names.index(ranking) if ranking in names else 0,
-        format_func=lambda name: presets[name].label or name,
+        index=0,
+        format_func=lambda name: RANKED if name is None else presets[name].label or name,
         key=key,
-        help="Stage 1 runs only the ranking scenario, so other loans list fewer deals.",
+        help="Stage 1 runs only each deal's ranking loan, so other loans list fewer deals.",
     )
+
+
+def _scenario_label(config: Config, scenario: str | None) -> str:
+    if scenario is None:
+        return RANKED.lower()
+    return config.settings.financing.presets[scenario].label or scenario
 
 
 def _kpi(row: DealRow, text: str, note: data.Provenance | None) -> str:
@@ -201,7 +213,7 @@ def deals_page() -> None:
         money(pd.Series(flows).median()) if flows else "n/a",
         help="per month, across the deals shown",
     )
-    label = config.settings.financing.presets[deals.scenario].label or deals.scenario
+    label = _scenario_label(config, deals.scenario)
     st.caption(f"Underwritten under: {label}. Ranked by {chosen.sort.lower()}.")
 
     ranked, maybe, failed = st.tabs(
@@ -257,13 +269,13 @@ def _ranked_tab(rows: list[DealRow], deals: data.Deals, limit: int, key: str) ->
     if go.button("Open", key=f"{key}_open", type="primary"):
         _open_deal(chosen.listing_id)
     csv.download_button(
-        "CSV", to_csv(rows), file_name=f"deals_{deals.scenario}.csv", mime="text/csv",
+        "CSV", to_csv(rows), file_name=f"deals_{deals.scenario or 'ranked'}.csv", mime="text/csv",
         key=f"{key}_csv", help="Every deal in this list, not only the rows shown.",
     )  # fmt: skip
     xlsx.download_button(
         "Excel",
         to_xlsx(rows),
-        file_name=f"deals_{deals.scenario}.xlsx",
+        file_name=f"deals_{deals.scenario or 'ranked'}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key=f"{key}_xlsx",
     )
@@ -503,11 +515,11 @@ def deal_page() -> None:
         inputs, flags = list(screen.inputs or []), list(screen.flags or [])
         details, enrichment = dict(screen.details or {}), dict(screen.enrichment or {})
         stage, note_text = screen.stage, screen.note
+        ranking = screen.ranking_scenario or config.settings.buy_box.ranking_scenario
         property_id, starred = place.id, place.starred
         confidence = place.unit_confidence
 
     presets = config.settings.financing.presets
-    ranking = config.settings.buy_box.ranking_scenario
     names = list(scenarios)
     name = st.segmented_control(
         "Loan scenario",

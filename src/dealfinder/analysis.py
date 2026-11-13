@@ -941,7 +941,7 @@ def analyze(
         scenarios=scenarios,
         rates=rates,
         skipped=skipped,
-        ranking_scenario=settings.buy_box.ranking_scenario,
+        ranking_scenario=settings.ranking_for(deal.unit_count),
         market=market,
         attributions=market.attributions if market else [],
     )

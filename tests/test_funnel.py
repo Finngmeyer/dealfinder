@@ -247,12 +247,41 @@ class TestProblems:
 
     def test_a_ranking_loan_that_does_not_fit_the_building(self, engine, config, offline):
         config.settings.buy_box.property_types = ["multifamily_5plus"]
+        config.settings.buy_box.ranking_scenario_5plus = None  # no loan named for big buildings
         store(engine, csv_listing(1, "Two fourplexes on one lot", bedrooms=16, bathrooms=8))
         classify_all(engine, config)
         funnel(engine, config, offline)
         assert screens(engine)[1].note == (
             "The ranking loan 'conv_investor' is not offered for 8 units."
         )
+
+    def test_bigger_buildings_rank_under_their_own_loan(self, engine, config, offline):
+        config.settings.buy_box.property_types = ["fourplex", "multifamily_5plus"]
+        store(
+            engine,
+            fourplex(1, 300_000.0),
+            csv_listing(2, "Two fourplexes on one lot", price=600_000.0, bedrooms=16, bathrooms=8),
+        )
+        classify_all(engine, config)
+        report = funnel(engine, config, offline)
+        assert report.underwritten == 2 and sum(report.grades.values()) == 2
+        found = screens(engine)
+        assert found[1].ranking_scenario == "conv_investor"
+        assert found[2].ranking_scenario == "commercial"
+        with session_scope(engine) as session:
+            ranked = {row.listing_id: row.scenario for row in deal_rows(session, config)}
+            assert ranked == {1: "conv_investor", 2: "commercial"}
+            # Naming a loan lists only the deals that have a result under it.
+            assert [row.listing_id for row in deal_rows(session, config, "commercial")] == [2]
+            assert [row.listing_id for row in deal_rows(session, config, "conv_investor")] == [1]
+            assert {row.listing_id for row in deal_rows(session, config, "cash")} == {1, 2}
+
+    def test_a_ranking_scenario_for_big_buildings_that_does_not_exist(
+        self, engine, config, offline
+    ):
+        config.settings.buy_box.ranking_scenario_5plus = "nope"
+        with pytest.raises(AnalysisError, match="ranking_scenario_5plus 'nope'"):
+            funnel(engine, config, offline)
 
 
 def serve_rents(http_mock, rent: float = 1400.0):

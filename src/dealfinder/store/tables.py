@@ -231,6 +231,7 @@ class ScreenRow(Base):
     property_id: Mapped[int] = mapped_column(ForeignKey("properties.id"), index=True)
     stage: Mapped[int]  # 0 could not be underwritten, 1 free data only, 2 enriched
     passed_stage1: Mapped[bool | None]
+    ranking_scenario: Mapped[str | None] = mapped_column(String(40))  # the loan it is ranked under
     note: Mapped[str | None] = mapped_column(Text)  # why kept, dropped or not underwritten
     type_match: Mapped[str] = mapped_column(String(12))  # yes | unverified
     confidence: Mapped[str | None] = mapped_column(String(8))  # of the unit count

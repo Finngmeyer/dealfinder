@@ -126,7 +126,9 @@ own values in `config/settings.local.yaml`, which overrides it and stays out of 
 the Settings page of the dashboard, which writes that file for you.
 
 Property types are a list: `fourplex` as shipped; add `duplex`, `triplex`, `sfr`, `condo`,
-`townhouse` or `multifamily_5plus`. For one property, the Deal page's "Your figures" tab takes
+`townhouse` or `multifamily_5plus`. Buildings of five units and up are screened and ranked
+under `buy_box.ranking_scenario_5plus` (the commercial loan as shipped), because the investor
+loan stops at four units. For one property, the Deal page's "Your figures" tab takes
 your own rents, tax bill, insurance, rate quote or offer price and underwrites it again.
 
 ## Checking the fourplex detector on real listings

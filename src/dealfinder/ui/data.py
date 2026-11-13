@@ -100,13 +100,12 @@ class Deals(BaseModel):
     rows: list[DealRow]
     problems: list[ProblemRow]
     provenance: dict[int, Provenance]  # by listing id
-    scenario: str
+    scenario: str | None  # None: each deal under the loan it is ranked by
 
 
 def load_deals(engine: Engine, config: Config, scenario: str | None = None) -> Deals:
-    name = scenario or config.settings.buy_box.ranking_scenario
     with session_scope(engine) as session:
-        rows = deal_rows(session, config, name)
+        rows = deal_rows(session, config, scenario)
         problems = problem_rows(session)
         inputs = dict(session.execute(select(ScreenRow.listing_id, ScreenRow.inputs)).all())
     return Deals(
@@ -118,7 +117,7 @@ def load_deals(engine: Engine, config: Config, scenario: str | None = None) -> D
             )
             for row in rows
         },
-        scenario=name,
+        scenario=scenario,
     )
 
 

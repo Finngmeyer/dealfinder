@@ -291,6 +291,7 @@ def upgrade() -> None:
         sa.Column("property_id", sa.Integer(), nullable=False),
         sa.Column("stage", sa.Integer(), nullable=False),
         sa.Column("passed_stage1", sa.Boolean(), nullable=True),
+        sa.Column("ranking_scenario", sa.String(length=40), nullable=True),
         sa.Column("note", sa.Text(), nullable=True),
         sa.Column("type_match", sa.String(length=12), nullable=False),
         sa.Column("confidence", sa.String(length=8), nullable=True),

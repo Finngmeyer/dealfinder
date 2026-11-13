@@ -638,7 +638,8 @@ def underwrite_command(
 def report_command(
     top: Annotated[int, typer.Option(help="How many deals to show.")] = 20,
     scenario: Annotated[
-        str | None, typer.Option(help="Loan preset to rank by. Default: the ranking scenario.")
+        str | None,
+        typer.Option(help="Loan preset to rank by. Default: each deal's ranking loan."),
     ] = None,
     state: Annotated[str | None, typer.Option(help="Two-letter state.")] = None,
     buy_box: Annotated[
@@ -664,17 +665,18 @@ def report_command(
         if problems:
             render_problems(problem_rows(session), console)
             return
-        name = scenario or config.settings.buy_box.ranking_scenario
-        if name not in config.settings.financing.presets:
+        if scenario is not None and scenario not in config.settings.financing.presets:
             known = ", ".join(config.settings.financing.presets)
-            raise _fail(f"Unknown scenario {name}. Choose from: {known}.")
-        rows = deal_rows(session, config, name)
+            raise _fail(f"Unknown scenario {scenario}. Choose from: {known}.")
+        rows = deal_rows(session, config, scenario)
         waiting = len(problem_rows(session))
     if state:
         rows = [row for row in rows if row.state == state.upper()]
     wanted = "unverified" if unverified else "yes"
     shown = [row for row in rows if row.type_match == wanted and (row.in_buy_box or not buy_box)]
-    render_report(shown[:top], name, console, total=len(shown))
+    # With no scenario named, each deal is shown under the loan it is ranked by.
+    used = sorted({row.scenario for row in shown}) or [config.settings.buy_box.ranking_scenario]
+    render_report(shown[:top], scenario or " and ".join(used), console, total=len(shown))
     for path, build in ((csv, to_csv), (xlsx, to_xlsx)):
         if path is not None:
             try:

@@ -41,6 +41,7 @@ class BuyBox(Strict):
     max_price: float | None
     min_unit_confidence: Literal["high", "medium", "low"]
     ranking_scenario: str
+    ranking_scenario_5plus: str | None
     targets: Targets
 
 
@@ -339,6 +340,23 @@ class Scrapers(Strict):
 
 
 class Settings(Strict):
+    """Everything in settings.yaml."""
+
+    def ranking_for(self, unit_count: int | None) -> str:
+        """The loan a building is screened and ranked under: the buy box's ranking scenario,
+        or the one named for bigger buildings when that loan is not offered at this size."""
+        box, presets = self.buy_box, self.financing.presets
+        main, other = presets.get(box.ranking_scenario), box.ranking_scenario_5plus
+        if (
+            unit_count
+            and main is not None
+            and not main.fits(unit_count)
+            and other in presets
+            and presets[other].fits(unit_count)
+        ):
+            return str(other)
+        return box.ranking_scenario
+
     buy_box: BuyBox
     underwriting: Underwriting
     when_unknown: WhenUnknown
@@ -582,9 +600,10 @@ def load_config(config_dir: Path | str | None = None) -> Config:
         files.append(local)
     settings = _validate(Settings, data, " + ".join(str(f) for f in files))
 
-    ranking = settings.buy_box.ranking_scenario
-    if ranking not in settings.financing.presets:
-        raise SettingsError(f"buy_box.ranking_scenario '{ranking}' is not a financing preset")
+    for field in ("ranking_scenario", "ranking_scenario_5plus"):
+        name = getattr(settings.buy_box, field)
+        if name is not None and name not in settings.financing.presets:
+            raise SettingsError(f"buy_box.{field} '{name}' is not a financing preset")
 
     limits_file = directory / "loan_limits" / f"{settings.financing.loan_limit_year}.yaml"
     if not limits_file.is_file():

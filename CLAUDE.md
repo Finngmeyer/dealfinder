@@ -185,8 +185,12 @@ data/                           runtime: database, cache, imports, labeled text 
   a count the rules hold at medium or better. Each description is sent at most once
   (`method` becomes `rules+llm`), capped by `classify.llm.max_calls_per_run`.
 - **The funnel.** `run_funnel` underwrites one listing per property (the most recently seen
-  active one) for every wanted or possibly-wanted type. Stage 1: free data, the ranking
-  scenario only, kept when cash flow per door or rent-to-price clears `funnel.stage1`.
+  active one) for every wanted or possibly-wanted type. Each listing has one ranking loan,
+  `Settings.ranking_for(unit_count)`: `buy_box.ranking_scenario`, or
+  `buy_box.ranking_scenario_5plus` where that loan does not lend (5+ units). It is stored in
+  `screens.ranking_scenario`, and `deal_rows(scenario=None)` returns every listing under its
+  own ranking loan. Stage 1: free data, the ranking
+  loan only, kept when cash flow per door or rent-to-price clears `funnel.stage1`.
   Stage 2: survivors inside the buy box's states and price, best cash flow first: property
   record, Claude, geocode, flood, a rent estimate per unit layout, then every loan preset.
   Each listing gets a `screens` row (stage, verdict, inputs with sources, flags, what stage 2

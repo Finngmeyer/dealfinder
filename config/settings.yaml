@@ -11,7 +11,8 @@ buy_box:
   states: all                    # all = the 48 contiguous states + DC, or a list such as [OH, IN, MI]
   max_price: 750000              # null = no cap
   min_unit_confidence: medium    # high | medium | low
-  ranking_scenario: conv_investor
+  ranking_scenario: conv_investor      # the loan deals are screened and ranked under
+  ranking_scenario_5plus: commercial   # used where that loan does not lend, such as 5+ units; null = none
   targets:                       # null switches a target off
     min_cash_flow_per_door_month: 100
     min_coc: 0.06

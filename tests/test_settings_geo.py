@@ -244,3 +244,28 @@ class TestGeo:
         assert place is not None
         assert place.state is None
         assert place.in_contiguous_us is None
+
+
+class TestRankingLoan:
+    def test_the_main_loan_where_it_lends_and_the_other_where_it_does_not(self, config):
+        settings = config.settings
+        assert [settings.ranking_for(units) for units in (1, 2, 4)] == ["conv_investor"] * 3
+        assert [settings.ranking_for(units) for units in (5, 8, 40)] == ["commercial"] * 3
+        assert settings.ranking_for(None) == "conv_investor"
+
+    def test_no_second_loan(self, config):
+        config.settings.buy_box.ranking_scenario_5plus = None
+        assert config.settings.ranking_for(8) == "conv_investor"
+
+    def test_a_main_loan_that_lends_on_everything_is_always_used(self, config):
+        config.settings.buy_box.ranking_scenario = "cash"
+        assert config.settings.ranking_for(8) == "cash"
+
+    def test_a_second_loan_that_is_not_a_preset_is_refused(self, config_dir):
+        from dealfinder.settings import SettingsError, load_config
+
+        (config_dir / "settings.local.yaml").write_text(
+            "buy_box: {ranking_scenario_5plus: jumbo}\n"
+        )
+        with pytest.raises(SettingsError, match="ranking_scenario_5plus 'jumbo'"):
+            load_config(config_dir)

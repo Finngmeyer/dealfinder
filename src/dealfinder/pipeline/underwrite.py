@@ -314,6 +314,7 @@ class _Outcome:
     """What one pass over a listing produced, kept light enough to hold for every listing."""
 
     listing_id: int
+    ranking: str | None = None  # the loan this listing is ranked under
     county: str | None = None
     cap_rate: float | None = None
     price_per_door: float | None = None
@@ -334,6 +335,7 @@ def _screen_row(session: Session, listing: ListingRow) -> ScreenRow:
 def _store_problem(session: Session, listing: ListingRow, match: str, problem: str) -> None:
     row = _screen_row(session, listing)
     row.stage, row.passed_stage1, row.note = 0, None, problem
+    row.ranking_scenario = None
     row.type_match, row.confidence, row.price = (
         match,
         listing.property.unit_confidence,
@@ -355,11 +357,13 @@ def _store_result(
     stage: int,
     passed: bool,
     note: str,
+    ranking: str,
     enrichment: dict[str, Any] | None = None,
 ) -> None:
     place = listing.property
     row = _screen_row(session, listing)
     row.stage, row.passed_stage1, row.note = stage, passed, note
+    row.ranking_scenario = ranking
     row.type_match, row.confidence, row.price = match, place.unit_confidence, result.request.price
     row.request = result.request.model_dump(mode="json")
     row.inputs = [line.model_dump(mode="json") for line in result.inputs]
@@ -433,8 +437,10 @@ def _underwrite(
     config: Config,
     markets: MarketCache,
     scenarios: list[str],
+    ranking: str,
 ) -> tuple[AnalysisResult, list[str]]:
-    """Underwrite one stored listing. Raises Unscreenable with the reason when it cannot be."""
+    """Underwrite one stored listing under ``scenarios``, which must include ``ranking``.
+    Raises Unscreenable with the reason when it cannot be."""
     place = listing.property
     tags = _tags(session, place.id)
     request = build_request(
@@ -466,7 +472,6 @@ def _underwrite(
         result = analyze(request, config, market)
     except AnalysisError as error:
         raise Unscreenable(str(error)) from error
-    ranking = config.settings.buy_box.ranking_scenario
     if not any(scenario.terms.name == ranking for scenario in result.scenarios):
         reason = result.skipped.get(ranking, "not available")
         raise Unscreenable(f"The ranking loan '{ranking}' is {reason}.")
@@ -675,17 +680,26 @@ def _process(
     session: Session,
     listing: ListingRow,
     match: str,
-    scenarios: list[str],
     stage: int,
     config: Config,
     markets: MarketCache,
+    *,
+    every_loan: bool,
     **extra: Any,
 ) -> _Outcome:
-    """Underwrite one listing and store the result, or the reason it could not be."""
+    """Underwrite one listing and store the result, or the reason it could not be.
+
+    With ``every_loan`` each enabled loan preset is run; without it only the loan the listing
+    is ranked under, which is all stage 1 needs.
+    """
     settings = config.settings
-    ranking = settings.buy_box.ranking_scenario
+    ranking = settings.ranking_for(listing.property.unit_count)
+    scenarios = [ranking]
+    if every_loan:
+        presets = settings.financing.presets
+        scenarios = [name for name, preset in presets.items() if preset.enabled or name == ranking]
     try:
-        result, tags = _underwrite(session, listing, match, config, markets, scenarios)
+        result, tags = _underwrite(session, listing, match, config, markets, scenarios, ranking)
     except Unscreenable as problem:
         _store_problem(session, listing, match, str(problem))
         return _Outcome(listing_id=listing.id, problem=str(problem))
@@ -695,12 +709,13 @@ def _process(
     )
     _store_result(
         session, listing, match, result, tags, config, stage=stage, passed=passed, note=note,
-        **extra,
+        ranking=ranking, **extra,
     )  # fmt: skip
     place = listing.property
     max_price = settings.buy_box.max_price
     return _Outcome(
         listing_id=listing.id,
+        ranking=ranking,
         county=place.county_fips,
         cap_rate=kpis.cap_rate,
         price_per_door=kpis.price_per_door,
@@ -742,11 +757,7 @@ def underwrite_listing(
     """Underwrite one stored listing again, under every loan preset, after its figures
     changed. Nothing is fetched beyond market data, and the county medians from the last
     full run are reused for the score. Returns the reason if it cannot be underwritten."""
-    settings = config.settings
-    ranking = settings.buy_box.ranking_scenario
-    presets = settings.financing.presets
-    every = [name for name, preset in presets.items() if preset.enabled or name == ranking]
-    box = settings.buy_box
+    box = config.settings.buy_box
     with session_scope(engine) as session:
         listing = session.get(ListingRow, listing_id)
         if listing is None:
@@ -770,10 +781,10 @@ def underwrite_listing(
             session,
             listing,
             match,
-            every,
             stage,
             config,
             markets or MarketCache(config, environment, fetcher),
+            every_loan=True,
         )
         session.flush()
         for row in session.scalars(
@@ -840,14 +851,13 @@ def run_funnel(
     the free sources.
     """
     settings = config.settings
-    ranking = settings.buy_box.ranking_scenario
     presets = settings.financing.presets
-    if ranking not in presets:
-        raise AnalysisError(
-            f"buy_box.ranking_scenario '{ranking}' is not a loan preset. "
-            f"Choose from: {', '.join(presets)}."
-        )
-    every = [name for name, preset in presets.items() if preset.enabled or name == ranking]
+    for field in ("ranking_scenario", "ranking_scenario_5plus"):
+        name = getattr(settings.buy_box, field)
+        if name is not None and name not in presets:
+            raise AnalysisError(
+                f"buy_box.{field} '{name}' is not a loan preset. Choose from: {', '.join(presets)}."
+            )
     markets = markets or MarketCache(config, environment, fetcher)
     report = FunnelReport()
     problems: Counter[str] = Counter()
@@ -862,10 +872,11 @@ def run_funnel(
     report.candidates = len(chosen)
     matches = dict(chosen)
 
-    def one(session: Session, listing: ListingRow, scenarios: list[str], stage: int, **extra: Any):
+    def one(session: Session, listing: ListingRow, stage: int, **extra: Any) -> _Outcome:
         return _process(
-            session, listing, matches[listing.id], scenarios, stage, config, markets, **extra
-        )
+            session, listing, matches[listing.id], stage, config, markets,
+            every_loan=stage == 2, **extra,
+        )  # fmt: skip
 
     load = (selectinload(ListingRow.property), selectinload(ListingRow.price_events))
     for batch in _chunks(keep, _BATCH):
@@ -874,7 +885,7 @@ def run_funnel(
                 select(ListingRow).where(ListingRow.id.in_(batch)).options(*load)
             ).all()
             for listing in rows:
-                outcomes[listing.id] = one(session, listing, [ranking], 1)
+                outcomes[listing.id] = one(session, listing, 1)
 
     # ---- stage 2: the survivors, best cash flow first
     survivors = sorted(
@@ -909,7 +920,7 @@ def run_funnel(
                     )
                     outcomes[listing.id] = _Outcome(listing_id=listing.id, problem="not wanted")
                     continue
-                outcomes[listing.id] = one(session, listing, every, 2, enrichment=notes)
+                outcomes[listing.id] = one(session, listing, 2, enrichment=notes)
                 report.enriched += 1
         report.records, report.rent_requests = spend.records, spend.rent_requests
         report.flood_lookups, report.geocodes = spend.flood_lookups, spend.geocodes
@@ -958,7 +969,7 @@ def run_funnel(
                 grade = _rescore(
                     row, config, *medians.get(counties.get(row.listing_id) or "", (None, None))
                 )
-                if row.scenario == ranking:
+                if row.scenario == outcomes[row.listing_id].ranking:
                     grades[grade] += 1
                     report.in_buy_box += bool(row.in_buy_box)
     report.grades = dict(grades)

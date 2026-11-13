@@ -85,9 +85,9 @@ class ProblemRow(BaseModel):
 
 
 def deal_rows(session: Session, config: Config, scenario: str | None = None) -> list[DealRow]:
-    """Every stored result for one scenario (default: the ranking scenario), best cash flow
-    per door first."""
-    name = scenario or config.settings.buy_box.ranking_scenario
+    """Stored results, best cash flow per door first: by default each listing under the loan
+    it is ranked by, or every listing that has a result under ``scenario`` when one is named."""
+    del config  # kept in the signature: callers pass it, and the ranking rule lives in settings
     stated = (
         select(UnitRow.property_id, func.count(UnitRow.in_place_rent).label("stated"))
         .where(UnitRow.vacant.is_(False))
@@ -100,7 +100,10 @@ def deal_rows(session: Session, config: Config, scenario: str | None = None) -> 
         .join(ListingRow, ListingRow.id == UnderwritingRow.listing_id)
         .join(PropertyRow, PropertyRow.id == UnderwritingRow.property_id)
         .outerjoin(stated, stated.c.property_id == PropertyRow.id)
-        .where(UnderwritingRow.scenario == name)
+        .where(
+            UnderwritingRow.scenario
+            == (ScreenRow.ranking_scenario if scenario is None else scenario)
+        )
         .order_by(UnderwritingRow.cash_flow_door_month.desc().nulls_last(), UnderwritingRow.id)
     )
     rows: list[DealRow] = []
