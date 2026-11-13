@@ -5,10 +5,10 @@ Local-first Python app that finds small multifamily listings (fourplexes by defa
 
 ## Current phase
 
-**All six phases are built.** What remains needs the owner: keys to run the paid and keyed
-sources live, a real MLS export for the precision test, and a private GitHub repository to
-push to (this session cannot create one). Each phase ended with passing tests, a demo command
-and a commit. The standing rule was to stop for the owner's OK after each phase; on
+**All six phases are built** and pushed to the owner's private repository,
+`Finngmeyer/dealfinder`, on `main` (November 13, 2026). What remains needs the owner: keys to
+run the paid and keyed sources live, and a real MLS export for the precision test. Each phase
+ended with passing tests, a demo command and a commit. The standing rule was to stop for the owner's OK after each phase; on
 November 12 the owner said to keep working through the phases while they were away.
 
 Phase 4's bar of 95% fourplex precision on 50 real labeled descriptions is not met yet, only
@@ -71,9 +71,8 @@ uv run python scripts/build_loan_limits.py 2027  # county loan limits for a new 
 
 Schema change: edit `store/tables.py`, run `uv run alembic revision --autogenerate -m "..."`,
 then in the new file replace `dealfinder.store.tables.UtcDateTime()` with `sa.DateTime()`.
-The app upgrades its database on start. Until the first push to the owner's repository there
-is only migration 0001, rebuilt with `scripts/regenerate_initial_migration.sh`; after that,
-never rebuild it: add migrations.
+The app upgrades its database on start. Migration 0001 is published and frozen: never edit or
+rebuild it, always add a new migration, so that a database made by an earlier version upgrades.
 
 `analyze` and `market` read market data from `data/cache` and the network. `--offline` uses the
 cache only, `analyze --no-market` skips market data, `market --refresh` downloads again.
@@ -235,7 +234,7 @@ data/                           runtime: database, cache, imports, labeled text 
   exports are the main listing feed until the budget changes.
 - Self-managed by default (`underwriting.management.mode: self`), with a toggle.
 - Runs on a laptop for now. Leave room for 5+ unit deals (commercial preset exists).
-- The app belongs in its own private repository.
+- The app belongs in its own private repository: `Finngmeyer/dealfinder`, branch `main`.
 - Approved: one RentCast property-record request per screened listing for unit count and last
   tax bill; listings whose unit count cannot be confirmed go in a separate "unverified" list.
 - The owner will export 50 to 100 multifamily listings with remarks for the Phase 4 precision test.
