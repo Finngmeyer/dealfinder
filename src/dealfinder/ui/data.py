@@ -26,7 +26,13 @@ from dealfinder.settings import (
 )
 from dealfinder.store.db import session_scope
 from dealfinder.store.overrides import FIELDS, clear_overrides, get_overrides, set_override
-from dealfinder.store.tables import ClassificationRow, ListingRow, PropertyRow, ScreenRow
+from dealfinder.store.tables import (
+    ClassificationRow,
+    ListingRow,
+    PropertyRow,
+    ScreenRow,
+    utcnow,
+)
 from dealfinder.store.usage import BudgetGuard
 
 # Inputs whose being estimated matters most to a reader of the ranked table.
@@ -203,7 +209,9 @@ def county_summaries(rows: Sequence[DealRow]) -> list[CountySummary]:
 
 def set_star(engine: Engine, property_id: int, starred: bool) -> None:
     with session_scope(engine) as session:
-        session.get_one(PropertyRow, property_id).starred = starred
+        place = session.get_one(PropertyRow, property_id)
+        place.starred = starred
+        place.starred_at = utcnow() if starred else None
 
 
 def set_hidden(engine: Engine, property_id: int, hidden: bool) -> None:

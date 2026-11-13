@@ -259,5 +259,59 @@ class Fetcher:
             body=body, fetched_at=fetched_at, from_cache=False, stale=False, headers=kept
         )
 
+    def post_json(
+        self,
+        source: str,
+        url: str,
+        payload: Any,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> httpx.Response:
+        """POST a JSON body and return the response on HTTP 2xx. Never cached.
+
+        Retries a dropped connection, a 429 or a 5xx like ``get`` does. ``url`` may itself be
+        a secret (a webhook), so it never appears in an error message.
+        """
+        if self.offline:
+            raise SourceUnavailable(source, "offline, so nothing was sent")
+
+        def once() -> httpx.Response:
+            self._pace(urlsplit(url).netloc)
+            options: dict[str, Any] = {"json": payload, "headers": dict(headers or {})}
+            if timeout_seconds is not None:  # otherwise the client's own timeout applies
+                options["timeout"] = timeout_seconds
+            try:
+                response = self._client.post(url, **options)
+            except httpx.TransportError as error:
+                raise _Retryable(f"network error ({type(error).__name__})") from error
+            status = response.status_code
+            if 200 <= status < 300:
+                return response
+            if status == 429 or status >= 500:
+                retry_after = response.headers.get("Retry-After", "")
+                if retry_after.replace(".", "", 1).isdigit():
+                    self._sleep(min(float(retry_after), _MAX_RETRY_AFTER_SECONDS))
+                raise _Retryable(f"HTTP {status}")
+            if status in (401, 403):
+                raise SourceUnavailable(
+                    source, f"HTTP {status}: the key or address was not accepted", status=status
+                )
+            raise SourceUnavailable(source, f"HTTP {status}", status=status)
+
+        retrying = Retrying(
+            stop=stop_after_attempt(self._attempts),
+            wait=wait_exponential_jitter(initial=1, max=20),
+            retry=retry_if_exception_type(_Retryable),
+            sleep=self._sleep,
+            reraise=True,
+        )
+        try:
+            return retrying(once)
+        except _Retryable as error:
+            raise SourceUnavailable(
+                source, f"no usable response after {self._attempts} attempts: {error}"
+            ) from error
+
     def close(self) -> None:
         self._client.close()

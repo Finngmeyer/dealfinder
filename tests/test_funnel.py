@@ -657,6 +657,24 @@ class TestCommands:
         bad = runner.invoke(app, ["report", "--scenario", "nope"])
         assert bad.exit_code == 2 and "Unknown scenario nope" in bad.output
 
+    def test_report_writes_spreadsheets(self, stored, tmp_path):
+        from typer.testing import CliRunner
+
+        from dealfinder.cli import app
+
+        runner = CliRunner()
+        runner.invoke(app, ["underwrite", "--stage1-only"])
+        csv, xlsx = tmp_path / "out" / "deals.csv", tmp_path / "out" / "deals.xlsx"
+        result = runner.invoke(
+            app, ["report", "--top", "1", "--csv", str(csv), "--xlsx", str(xlsx)],
+            env={"COLUMNS": "200"},
+        )  # fmt: skip
+        assert result.exit_code == 0, result.output
+        assert f"Wrote 2 deals to {csv}" in result.output  # the whole list, not just the top
+        lines = csv.read_text(encoding="utf-8-sig").strip().splitlines()
+        assert lines[0].startswith("Rank,Grade,Score") and len(lines) == 4
+        assert xlsx.read_bytes()[:2] == b"PK"
+
     def test_stage1_only(self, stored):
         from typer.testing import CliRunner
 

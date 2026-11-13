@@ -62,6 +62,7 @@ def upgrade() -> None:
         sa.Column("in_flood_zone", sa.Boolean(), nullable=True),
         sa.Column("flood_checked_at", sa.DateTime(), nullable=True),
         sa.Column("starred", sa.Boolean(), nullable=False),
+        sa.Column("starred_at", sa.DateTime(), nullable=True),
         sa.Column("hidden", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),

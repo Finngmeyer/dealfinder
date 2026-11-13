@@ -294,6 +294,50 @@ class Scoring(Strict):
     grades: dict[str, float]
 
 
+class AlertChannels(Strict):
+    discord: bool
+    slack: bool
+    email: bool
+
+
+class Alerts(Strict):
+    enabled: bool
+    channels: AlertChannels
+    grades: list[str]
+    starred_price_cut_pct: float = Field(gt=0, lt=1)
+    max_deals_per_section: int = Field(ge=1)
+
+
+Weekday = Literal["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+class Schedule(Strict):
+    daily_at: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    weekly_on: Weekday
+    weekly_at: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+class HomeHarvestSettings(Strict):
+    locations: list[str]
+    max_results_per_location: int = Field(ge=1, le=10_000)
+    extra_property_data: bool
+
+
+class ApifyZillowSettings(Strict):
+    actor: str
+    search_urls: list[str]
+    extraction_method: Literal["PAGINATION_WITH_ZOOM_IN", "PAGINATION", "MAP_MARKERS"]
+    results_limit: int = Field(ge=1)
+    price_per_result: float = Field(ge=0)
+    monthly_result_cap: int | None = Field(ge=0)
+
+
+class Scrapers(Strict):
+    min_seconds_between_requests: float = Field(ge=1)
+    homeharvest: HomeHarvestSettings
+    apify_zillow: ApifyZillowSettings
+
+
 class Settings(Strict):
     buy_box: BuyBox
     underwriting: Underwriting
@@ -310,6 +354,9 @@ class Settings(Strict):
     classify: Classify
     funnel: Funnel
     scoring: Scoring
+    alerts: Alerts
+    schedule: Schedule
+    scrapers: Scrapers
 
 
 class CountyLimits(Strict):
@@ -379,6 +426,7 @@ class Environment(BaseSettings):
     smtp_username: str | None = None
     smtp_password: SecretStr | None = None
     alert_email_to: str | None = None
+    alert_email_from: str | None = None  # defaults to SMTP_USERNAME
 
     dealfinder_config_dir: Path | None = None
     dealfinder_data_dir: Path = Path("data")

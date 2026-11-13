@@ -163,6 +163,35 @@ scoring:                         # deal score, 0 to 100; weights add up to 100
   confidence_multiplier: {high: 1.0, medium: 0.85, low: 0.7}     # by unit-count confidence
   grades: {A: 80, B: 65, C: 50, D: 35}       # lowest score for each grade; below D is F
 
+alerts:                          # one digest per run; nothing is ever sent twice
+  enabled: true
+  channels:                      # each one also needs its key in .env
+    discord: true                # DISCORD_WEBHOOK_URL
+    slack: true                  # SLACK_WEBHOOK_URL
+    email: true                  # SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD, ALERT_EMAIL_TO
+  grades: [A, B]                 # a deal inside the buy box with one of these grades is worth an alert
+  starred_price_cut_pct: 0.03    # a starred property's price falls by at least this much at once
+  max_deals_per_section: 10      # longer lists are cut, with a count of the rest
+
+schedule:                        # for `dealfinder schedule`; times are this computer's local time
+  daily_at: "07:00"
+  weekly_on: sunday
+  weekly_at: "06:00"
+
+scrapers:                        # read only when a scraper source above is switched on
+  min_seconds_between_requests: 10   # one request at a time, with this pause between them
+  homeharvest:                   # the HomeHarvest library, which reads Realtor.com
+    locations: []                # e.g. ["Columbus, OH", "43215"]; empty = each state asked for
+    max_results_per_location: 400
+    extra_property_data: false   # true asks once more per listing: slower, and more load on the site
+  apify_zillow:                  # a paid Apify actor; needs APIFY_TOKEN
+    actor: maxcopell~zillow-scraper
+    search_urls: []              # Zillow search URLs that contain ?searchQueryState=...
+    extraction_method: PAGINATION_WITH_ZOOM_IN
+    results_limit: 200           # per search URL; Apify bills each result
+    price_per_result: 0.0023     # Apify's free-tier price in dollars, used for the cost estimate
+    monthly_result_cap: 1000     # hard stop on results per calendar month; null removes it
+
 financing:
   loan_limit_year: 2026          # picks config/loan_limits/<year>.yaml
   base_rate_manual: null         # your own base rate, used instead of the 30-year average

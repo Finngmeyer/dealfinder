@@ -11,11 +11,14 @@ from pydantic import ValidationError
 from rich.console import Console
 from sqlalchemy import Engine, select
 
+from dealfinder import scheduler
 from dealfinder.adapters.rentcast import RentCastSource
+from dealfinder.alerts import run_alerts
 from dealfinder.analysis import AnalysisError, AnalyzeRequest, analyze
 from dealfinder.classify.classifier import ClassifierInput, classify, kind_matches
 from dealfinder.classify.evaluate import append_label_rows, evaluate, load_labeled
 from dealfinder.classify.llm import ClaudeExtractor, Extractor
+from dealfinder.export import to_csv, to_xlsx
 from dealfinder.geo import normalize_zip
 from dealfinder.http import Fetcher
 from dealfinder.market.context import MarketContext, load_market
@@ -27,6 +30,7 @@ from dealfinder.pipeline.classify import (
 )
 from dealfinder.pipeline.importer import CsvImportError, import_csv
 from dealfinder.pipeline.report import deal_rows, problem_rows
+from dealfinder.pipeline.run import run_all, write_log
 from dealfinder.pipeline.sweep import Mode, SweepError, plan_sweep, run_sweep, sweep_states
 from dealfinder.pipeline.underwrite import run_funnel
 from dealfinder.render import (
@@ -642,6 +646,12 @@ def report_command(
     problems: Annotated[
         bool, typer.Option("--problems", help="Show listings that could not be underwritten.")
     ] = False,
+    csv: Annotated[
+        Path | None, typer.Option(help="Also write every deal in the list to this CSV file.")
+    ] = None,
+    xlsx: Annotated[
+        Path | None, typer.Option(help="Also write every deal in the list to this Excel file.")
+    ] = None,
 ) -> None:
     """Rank the underwritten deals by cash flow per door."""
     config, _, engine = _load()
@@ -661,6 +671,14 @@ def report_command(
     wanted = "unverified" if unverified else "yes"
     shown = [row for row in rows if row.type_match == wanted and (row.in_buy_box or not buy_box)]
     render_report(shown[:top], name, console, total=len(shown))
+    for path, build in ((csv, to_csv), (xlsx, to_xlsx)):
+        if path is not None:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(build(shown))
+            except OSError as error:
+                raise _fail(f"Could not write {path}: {error.strerror or error}") from error
+            console.print(f"Wrote {len(shown)} deals to {path}", markup=False)
     others = sum(1 for row in rows if row.type_match != wanted)
     if others or waiting:
         console.print(
@@ -669,6 +687,115 @@ def report_command(
             f"{waiting} that could not be underwritten (--problems).",
             style="dim",
         )
+
+
+@app.command("run")
+def run_command(
+    mode: Annotated[
+        str, typer.Option(help="daily: new listings only. weekly: every active listing.")
+    ] = "daily",
+    states: Annotated[
+        str | None, typer.Option(help="Comma-separated states. Default: the buy box.")
+    ] = None,
+    no_sweep: Annotated[
+        bool, typer.Option("--no-sweep", help="Do not fetch listings; use what is stored.")
+    ] = False,
+    no_alerts: Annotated[bool, typer.Option("--no-alerts", help="Do not send alerts.")] = False,
+) -> None:
+    """Everything in one go: fetch, classify, underwrite, alert. The scheduler runs this."""
+    if mode not in ("daily", "weekly"):
+        raise typer.BadParameter("Use daily or weekly.", param_hint="--mode")
+    config, environment, engine = _load()
+    console = Console()
+    fetcher = Fetcher(environment.cache_dir, offline=environment.dealfinder_offline)
+    try:
+        source, guard = _rentcast(config, environment, engine, fetcher)
+        connected = bool(environment.rentcast_api_key)
+        report = run_all(
+            engine,
+            config,
+            environment,
+            fetcher,
+            mode=mode,  # type: ignore[arg-type]
+            states=states.split(",") if states else None,
+            rentcast=source if connected else None,
+            guard=guard if connected else None,
+            extractor=_extractor(config, environment, console),
+            sweep=not no_sweep,
+            alerts=not no_alerts,
+        )
+    finally:
+        fetcher.close()
+    console.print(report.text(), markup=False)
+    log = write_log(report, environment.dealfinder_data_dir / "logs")
+    console.print(f"Logged to {log}", style="dim", markup=False)
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@app.command("schedule")
+def schedule_command(
+    install: Annotated[
+        bool, typer.Option("--install", help="Add the schedule to cron or Task Scheduler.")
+    ] = False,
+    remove: Annotated[bool, typer.Option("--remove", help="Take the schedule out again.")] = False,
+) -> None:
+    """Show the schedule for `dealfinder run`, or install or remove it.
+
+    Times come from `schedule` in settings. Without an option this only shows what would be
+    added; nothing on your computer changes.
+    """
+    import sys
+
+    config, environment, _ = _load()
+    if install and remove:
+        raise _fail("Choose one of --install and --remove.")
+    console = Console()
+    project = Path.cwd()
+    logs = (environment.dealfinder_data_dir / "logs").resolve()
+    items = scheduler.entries(config.settings.schedule, sys.executable)
+    try:
+        if remove:
+            console.print(scheduler.remove(), markup=False)
+            return
+        for line in scheduler.describe(items):
+            console.print(line, markup=False)
+        if install:
+            console.print(scheduler.install(items, project, logs), markup=False)
+            return
+    except (RuntimeError, OSError) as error:
+        raise _fail(str(error)) from error
+    console.print("\nThis is what --install would add:", markup=False)
+    if sys.platform.startswith("win"):
+        for command in scheduler.windows_commands(items, project, logs):
+            console.print(" ".join(command), markup=False, soft_wrap=True)
+    else:
+        for line in scheduler.crontab_lines(items, project, logs):
+            console.print(line, markup=False, soft_wrap=True)
+    console.print(
+        "\nA computer that is asleep at these times misses the run; the next one catches up.",
+        style="dim",
+    )
+
+
+@app.command("alerts")
+def alerts_command(
+    send: Annotated[
+        bool, typer.Option("--send", help="Send the digest. Without it, only show it.")
+    ] = False,
+) -> None:
+    """Show what there is to alert on, or send it: one digest, never the same alert twice.
+
+    New deals inside the buy box graded A or B, deals that qualify after a price cut, and
+    price cuts on starred properties.
+    """
+    config, environment, engine = _load()
+    fetcher = Fetcher(environment.cache_dir, offline=environment.dealfinder_offline)
+    try:
+        report = run_alerts(engine, config, environment, fetcher, send=send)
+    finally:
+        fetcher.close()
+    Console().print(report.text(), markup=False)
 
 
 @app.command("ui")
