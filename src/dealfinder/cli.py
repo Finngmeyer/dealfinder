@@ -12,6 +12,8 @@ from rich.console import Console
 from sqlalchemy import Engine, select
 
 from dealfinder import scheduler
+from dealfinder.adapters.apify_zillow import ApifyZillowSource
+from dealfinder.adapters.homeharvest import HomeHarvestSource
 from dealfinder.adapters.rentcast import RentCastSource
 from dealfinder.alerts import run_alerts
 from dealfinder.analysis import AnalysisError, AnalyzeRequest, analyze
@@ -22,6 +24,7 @@ from dealfinder.export import to_csv, to_xlsx
 from dealfinder.geo import normalize_zip
 from dealfinder.http import Fetcher
 from dealfinder.market.context import MarketContext, load_market
+from dealfinder.models import Geo, ListingSource
 from dealfinder.pipeline.classify import (
     classify_all,
     label_rows,
@@ -29,6 +32,7 @@ from dealfinder.pipeline.classify import (
     unresolved_listings,
 )
 from dealfinder.pipeline.importer import CsvImportError, import_csv
+from dealfinder.pipeline.ingest import ingest
 from dealfinder.pipeline.report import deal_rows, problem_rows
 from dealfinder.pipeline.run import run_all, write_log
 from dealfinder.pipeline.sweep import Mode, SweepError, plan_sweep, run_sweep, sweep_states
@@ -689,6 +693,89 @@ def report_command(
         )
 
 
+SCRAPERS = ("homeharvest", "apify_zillow")
+
+
+def _scraper(
+    name: str, config: Config, environment: Environment, engine: Engine, fetcher: Fetcher
+) -> ListingSource:
+    settings = config.settings
+    if name == "homeharvest":
+        return HomeHarvestSource(settings.scrapers, max_price=settings.buy_box.max_price)
+    rule = settings.scrapers.apify_zillow
+    token = environment.apify_token
+    return ApifyZillowSource(
+        fetcher,
+        token=token.get_secret_value() if token else None,
+        settings=rule,
+        guard=BudgetGuard(engine, "apify", cap=rule.monthly_result_cap),
+    )
+
+
+def _enabled_scrapers(
+    config: Config, environment: Environment, engine: Engine, fetcher: Fetcher
+) -> list[ListingSource]:
+    return [
+        _scraper(name, config, environment, engine, fetcher)
+        for name in SCRAPERS
+        if name in config.settings.sources and config.settings.sources[name].enabled
+    ]
+
+
+@app.command("fetch")
+def fetch_command(
+    source: Annotated[str, typer.Option(help="Scraper source: homeharvest or apify_zillow.")],
+    states: Annotated[
+        str | None, typer.Option(help="Comma-separated states. Default: the buy box.")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would be asked for; fetch nothing.")
+    ] = False,
+) -> None:
+    """Fetch listings from an optional scraper source. Off unless switched on in settings.
+
+    Scrapers are not licensed feeds: read the site's terms before switching one on. They run
+    one request at a time, never through a proxy, and stop at the first refusal.
+    """
+    config, environment, engine = _load()
+    console = Console()
+    if source not in SCRAPERS:
+        raise _fail(f"Unknown source {source}. Choose from: {', '.join(SCRAPERS)}.")
+    if not config.settings.sources[source].enabled:
+        raise _fail(
+            f"{source} is a scraper and is switched off (sources.{source}.enabled in settings). "
+            "Read the README's section on scrapers before switching it on."
+        )
+    try:
+        chosen = sweep_states(config, states.split(",") if states else None)
+    except SweepError as error:
+        raise _fail(str(error)) from error
+    types = config.settings.buy_box.property_types
+    fetcher = Fetcher(environment.cache_dir, offline=environment.dealfinder_offline)
+    try:
+        adapter = _scraper(source, config, environment, engine, fetcher)
+        if dry_run:
+            notes: list[str] = []
+            for state in chosen:
+                estimate = adapter.estimate_calls(Geo(state=state), types)
+                if estimate.note not in notes and (estimate.calls or not notes):
+                    notes.append(estimate.note)
+            for note in notes:
+                console.print(f"{source}: {note}.", markup=False)
+            console.print("Dry run: nothing was fetched.", style="dim")
+            return
+        console.print(
+            f"{source} is a scraper, not a licensed feed. One request at a time, no proxy.",
+            style="yellow",
+        )
+        report = ingest(engine, config, adapter, chosen, types)
+    finally:
+        fetcher.close()
+    console.print(report.text(), style="yellow" if report.stopped else None, markup=False)
+    if report.seen:
+        console.print(classify_all(engine, config).text(), markup=False)
+
+
 @app.command("run")
 def run_command(
     mode: Annotated[
@@ -721,6 +808,7 @@ def run_command(
             rentcast=source if connected else None,
             guard=guard if connected else None,
             extractor=_extractor(config, environment, console),
+            scrapers=[] if no_sweep else _enabled_scrapers(config, environment, engine, fetcher),
             sweep=not no_sweep,
             alerts=not no_alerts,
         )

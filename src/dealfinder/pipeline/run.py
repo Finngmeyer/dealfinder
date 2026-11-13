@@ -18,7 +18,9 @@ from dealfinder.alerts import run_alerts
 from dealfinder.analysis import AnalysisError
 from dealfinder.classify.llm import Extractor
 from dealfinder.http import Fetcher
+from dealfinder.models import ListingSource
 from dealfinder.pipeline.classify import classify_all
+from dealfinder.pipeline.ingest import ingest
 from dealfinder.pipeline.sweep import Mode, SweepError, run_sweep, sweep_states
 from dealfinder.pipeline.underwrite import run_funnel
 from dealfinder.settings import Config, Environment
@@ -58,6 +60,7 @@ def run_all(
     rentcast: RentCastSource | None = None,
     guard: BudgetGuard | None = None,
     extractor: Extractor | None = None,
+    scrapers: Sequence[ListingSource] = (),
     sweep: bool = True,
     alerts: bool = True,
     now: datetime | None = None,
@@ -98,6 +101,16 @@ def run_all(
             )
         except SweepError as error:
             report.steps.append(Step(name="Listings", text=str(error), ok=False))
+
+    for scraper in scrapers:  # only the ones switched on in settings are passed in
+        fetched = ingest(
+            engine,
+            config,
+            scraper,
+            sweep_states(config, list(states) if states else None),
+            settings.buy_box.property_types,
+        )
+        report.steps.append(Step(name=f"Scraper: {scraper.name}", text=fetched.text()))
 
     report.steps.append(Step(name="Classify", text=classify_all(engine, config).text()))
 

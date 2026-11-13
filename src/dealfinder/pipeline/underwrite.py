@@ -71,6 +71,10 @@ def source_label(source: str) -> str:
         return "RentCast listing"
     if source.startswith("csv:"):
         return f"your import '{source[4:]}'"
+    if source == "homeharvest":
+        return "Realtor.com via HomeHarvest (scraped)"
+    if source == "apify_zillow":
+        return "Zillow via Apify (scraped)"
     return source
 
 

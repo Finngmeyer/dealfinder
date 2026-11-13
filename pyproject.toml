@@ -27,6 +27,9 @@ dealfinder = "dealfinder.cli:app"
 llm = [
     "anthropic>=1.0",
 ]
+scrapers = [
+    "homeharvest>=0.8",
+]
 
 [dependency-groups]
 dev = [
